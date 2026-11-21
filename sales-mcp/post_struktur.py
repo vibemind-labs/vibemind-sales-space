@@ -9,6 +9,15 @@ import re
 
 BEREICHE = ("privat", "business")
 
+# Dringlichkeit einer Mail, von dringend nach unwichtig (Spec 3a).
+DRINGLICHKEITEN = ("sofort", "heute", "kann_warten", "nichts")
+
+
+def dringender(a: str | None, b: str | None) -> str | None:
+    """Die dringendere von zwei Stufen; None zaehlt nicht."""
+    stufen = [x for x in (a, b) if x in DRINGLICHKEITEN]
+    return min(stufen, key=DRINGLICHKEITEN.index) if stufen else None
+
 # „Zum Nachsehen“ ist das Fach fuer alles, was nicht sicher zuzuordnen ist
 # (Sortierer und Pruefer uneins); solche Mails liegen immer privat, damit nur
 # der Besitzer sie sieht, bis ein Mensch sie einordnet. Der Konstantenname
