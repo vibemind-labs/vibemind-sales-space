@@ -4612,3 +4612,60 @@ Der stündliche Abgleich (oben) kennt diese Dateien: Waisen älter als 10 Minute
 
 **Löschen:** siehe `docs/06_DSGVO.md`, Abschnitt „Kursmitschrift und Kurs-Handbuch“. Tests: `tests/test_kurs_*.py`,
 `tests/test_termin_takt_kurs.py`, `tests/test_ui_kurs.py`, `tests/test_auge_pdf.py` (auf der VM mit `vm_test.sh`).
+
+## Post-Assistent 3a ausrollen (Pruefung, Dringlichkeit, Hinweis bei Anweisung an eine KI)
+
+Zweig `cc/post-assistent-3a`. Neu: `sales-post` prueft jede Mail auf Anweisungen an eine KI und stuft die
+Dringlichkeit ein; der Posteingang sortiert danach, und unter `/freigaben` -> Nachrichten gibt es die Art
+„Mails mit Anweisung an eine KI“ (nur fuer den Besitzer sichtbar). Betroffen sind vier Dienste: `freigabe-bote`, `sales-ui`, `sales-mcp`, `sales-post`. Das Ausrollen geschieht **nur mit Felix' OK, jeder
+Schritt einzeln**; es gibt weder Merge noch Deploy ohne seine Freigabe. Immer Dienste beim Namen nennen, nie ein
+nacktes `docker compose up -d`. Alle Befehle auf der VM (`ssh offload-vm`, Verzeichnis `~/sales-claw`).
+
+1. **Sicherung** (Felix' OK). Vor jeder Aenderung am Schema `sales`:
+   `ssh offload-vm 'docker exec debian-supabase-db-1 pg_dump -U supabase_admin -d postgres -t sales.post_mails -t sales.freigabe_eintraege' > post-assistent-3a-sicherung.sql`
+   (Datei ausserhalb des Repos ablegen; sie enthaelt Mailinhalte, nicht einchecken). Gegenprobe: Datei nicht leer,
+   `grep -c '^CREATE TABLE' post-assistent-3a-sicherung.sql` meldet 2.
+2. **Beide Migrationen auf `sales` einspielen** (Felix' OK), **je zweimal**. Auch `freigabe-eingang.sql`
+   gehoert dazu: die neue Art liegt in `freigabe_eintraege`.
+   ```bash
+   ssh offload-vm 'docker exec -i debian-supabase-db-1 psql -q -U supabase_admin -d postgres -v ON_ERROR_STOP=1 -v schema=sales' < db/post-sammelstelle.sql
+   ssh offload-vm 'docker exec -i debian-supabase-db-1 psql -q -U supabase_admin -d postgres -v ON_ERROR_STOP=1 -v schema=sales' < db/freigabe-eingang.sql
+   ```
+   Beide Befehle ein zweites Mal ausfuehren: der zweite Lauf muss **leer** sein (kein Fehler, keine Ausgabe).
+   Die neuen Spalten stoeren den alten Code nicht. NIE `schema=sales_test` mit `sales` verwechseln.
+3. **Bauen und genau vier Dienste neu erstellen** (Felix' OK, jeder Schritt einzeln). Alle teilen sich das Image
+   `sales-claw-sales-mcp:local`. Es genuegt **nicht**, nur `sales-mcp` und `sales-post` zu erneuern: `ui.py`,
+   `ui_post.py` und `ui_freigabe_eingang.py` laufen im Container `sales-ui`, `freigabe_bote.py` und
+   `freigabe_eingang.py` in `freigabe-bote` (siehe `docker-compose.yml`). Bliebe der alte Bote, spiegelte er
+   `post_anweisung`-Eintraege nach Rowboat (ihm fehlt der Filter `NICHT_NACH_ROWBOAT`); bliebe die alte UI,
+   haette sie weder Reiter noch Route und Felix koennte nichts freigeben.
+   - Vorher je Dienst Drift pruefen, damit nichts anderes mitgezogen wird:
+     `docker compose -f docker-compose.yml -f docker-compose.fenster.yml config --hash=<svc>` gegen das Label
+     `docker inspect --format '{{ index .Config.Labels "com.docker.compose.config-hash" }}' <container>`, und das
+     laufende Image gegen den Tag (`docker inspect --format '{{.Image}}' <container>` gegen
+     `docker image inspect --format '{{.Id}}' sales-claw-sales-mcp:local`). Weicht etwas ab, **stoppen und Felix
+     fragen**, nicht weiter.
+   - Rueckweg sichern: `docker tag sales-claw-sales-mcp:local sales-claw-sales-mcp:vorher-3a`.
+   - `docker compose -f docker-compose.yml -f docker-compose.fenster.yml build sales-mcp`
+     (ein Build genuegt, die anderen Dienste nutzen dasselbe Image).
+   - **Reihenfolge:** zuerst `freigabe-bote` und `sales-ui` (zusammen oder nacheinander), dann `sales-mcp`, zuletzt
+     `sales-post`. Je Dienst:
+     `docker compose -f docker-compose.yml -f docker-compose.fenster.yml up -d --no-deps --no-build <svc>`.
+   - Ohne Profilwechsel, ohne `--force-recreate` auf andere Dienste, ohne nacktes `up`.
+4. **Probe nach der ersten Runde** (Felix' OK, wenn die Runde durch ist):
+   - `select count(*) filter (where geprueft_am::date = current_date), count(*) filter (where enthaelt_anweisung) from sales.post_mails;`
+     (via `docker exec -i debian-supabase-db-1 psql -U supabase_admin -d postgres -c "..."`). Die erste Zahl waechst je
+     Runde bis zur Tagesgrenze, die zweite zaehlt die erkannten Anweisungen.
+   - Gateway-Log ohne `400`: `docker logs --since <lokalzeit> ${PRAEFIX}-claw 2>&1 | grep -c ' 400'` meldet 0
+     (`--since` ohne `Z` ist Lokalzeit des Hosts).
+   - `/freigaben` zeigt unter Nachrichten den Reiter „Mails mit Anweisung an eine KI“ (nur als Besitzer eingeloggt).
+5. **Rueckweg** (Felix' OK, jeder Schritt einzeln), in umgekehrter Reihenfolge: **zuerst `sales-post` stoppen**
+   (`docker compose -f docker-compose.yml -f docker-compose.fenster.yml stop sales-post`) oder, mit Felix' OK, offene
+   Eintraege mit `herkunft='post'` schliessen; sonst entstehen weiter `post_anweisung`-Eintraege, die der alte Bote
+   nach Rowboat spiegeln wuerde. Dann `docker tag sales-claw-sales-mcp:vorher-3a sales-claw-sales-mcp:local` und
+   `up -d --no-deps --no-build` fuer `sales-mcp`, `sales-ui`, und **als Letztes `freigabe-bote`**. Die neuen Spalten
+   bleiben stehen und stoeren den alten Code nicht; die Sicherung aus Schritt 1 ist nur der zweite Boden.
+
+**Hinweis `POST_TAGESGRENZE`:** `POST_TAGESGRENZE=1500` gilt bis etwa 28.11.2026, damit der Rueckstand abgebaut und
+nachgeprueft wird. Erst nach dem Abbau des Rueckstands und der Nachpruefung zurueck auf `500` (Zeile in der `.env`
+entfernen = `500`) und `docker compose up -d --no-deps --no-build sales-post` (nur `sales-post`).
