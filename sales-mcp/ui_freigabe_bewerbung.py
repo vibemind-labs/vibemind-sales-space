@@ -849,7 +849,10 @@ def _pruefzeile(ui, k: dict) -> str:
         uhr = _in_ortszeit(p.get("naechste_ab"), lambda z: _uhrzeit(ui, z))
         text = f"Anzeige meldet {code} – zweite Prüfung" if code else "Anzeige scheint offline – zweite Prüfung"
         return f'<p class="meta">{text}{f" ab {uhr}" if uhr else ""}</p>'
-    uhr = _in_ortszeit(p.get("geprueft_am"), lambda z: _uhrzeit(ui, z))
+    uhr = None
+    if p.get("letzte") == "online":  # die Zeit des eindeutigen Ergebnisses, nicht die einer unklaren Prüfung danach
+        uhr = _in_ortszeit(p.get("eindeutig_am"), lambda z: _uhrzeit(ui, z))
+    uhr = uhr or _in_ortszeit(p.get("geprueft_am"), lambda z: _uhrzeit(ui, z))
     teil = f" (geprüft {uhr})" if uhr else ""
     if p.get("letzte") == "online":
         return f'<p class="meta">Anzeige online{teil}</p>'

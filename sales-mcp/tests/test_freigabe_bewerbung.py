@@ -3875,6 +3875,39 @@ def test_pruefzeile(pruef, text):
     assert ui_freigabe_bewerbung._pruefzeile(ui, karte(anzeige=pruef)) == text
 
 
+def test_online_zeile_nimmt_die_zeit_des_eindeutigen_ergebnisses():
+    # geprueft_am 20:00 (UTC) war unklar; entschieden hat die Pruefung um 08:00.
+    k = karte(anzeige=dict(PRUEF, letzte="online", code="200", geprueft_am="2026-10-30T20:00:00+00:00",
+                           eindeutig_am="2026-10-30T07:00:00+00:00"))
+    assert ui_freigabe_bewerbung._pruefzeile(ui, k) == '<p class="meta">Anzeige online (geprüft 08:00 (30.10.))</p>'
+
+
+@pytest.mark.parametrize("eindeutig", [None, "", "kaputt", 5])
+def test_online_zeile_ohne_lesbares_eindeutig_am_wie_bisher(eindeutig):
+    k = karte(anzeige=dict(PRUEF, letzte="online", code="200", geprueft_am="2026-10-30T20:00:00+00:00",
+                           eindeutig_am=eindeutig))
+    assert ui_freigabe_bewerbung._pruefzeile(ui, k) == '<p class="meta">Anzeige online (geprüft 21:00 (30.10.))</p>'
+
+
+def test_unklar_zeile_bleibt_bei_geprueft_am():
+    k = karte(anzeige=dict(PRUEF, letzte=None, code=None, geprueft_am="2026-10-30T20:00:00+00:00",
+                           eindeutig_am="2026-10-30T07:00:00+00:00"))
+    assert "geprüft 21:00" in ui_freigabe_bewerbung._pruefzeile(ui, k)
+
+
+def test_seite_zeigt_anzeige_offline_in_kopf_und_pruefzeile(client, falsch):
+    falsch.karten = [karte(anzeige=dict(PRUEF, offline=True)),
+                     dict(pkarte(), application_id="bw-5000", anzeige=dict(PRUEF, offline=True))]
+    u, p = _karten(_abschnitt(client))[:2]
+    for text in (u, p):
+        kopf = text.split("</summary>")[0]
+        assert '<span class="stand warn">Anzeige offline</span>' in kopf
+        zeile = '<div class="warnung">Anzeige offline (410)</div>'
+        assert zeile in text
+        meta = text.index('<div class="meta">')
+        assert text[meta:].split("</div>", 1)[1].startswith(zeile)
+
+
 def test_ohne_anzeige_feld_wie_teil_1(client, falsch):
     s = _abschnitt(client)
     assert "Anzeige meldet" not in s and "Anzeige online" not in s and "Anzeige offline" not in s
