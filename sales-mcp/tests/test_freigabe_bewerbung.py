@@ -454,14 +454,14 @@ def test_freigeben_reicht_fassung_bindung_von_weiter(client, falsch):
                     follow_redirects=False)
     assert r.status_code == 303 and falsch.aufrufe[-1] == (
         "POST", f"/bewerbungen/{BID}/freigeben", {"fassung": 1, "bindung": B, "von": "mira"})
-    assert r.headers["location"] == "/freigaben?bw_hinweis=freigegeben#bewerbungen"
+    assert r.headers["location"] == f"/freigaben?bw_hinweis=freigegeben&bw_karte={BID}#karte-{BID}"
     assert falsch.im_loop == []
     assert "Freigegeben – die Zentrale hat die Entscheidung verbucht" in _abschnitt(client, r.headers["location"])
 
 
 def test_nicht_bewerben_mit_und_ohne_grund(client, falsch):
     r = _post(client, "nicht-bewerben", fassung="1", bindung=B, bestaetigt="ja", grund="  Zu weit weg  ")
-    assert r.status_code == 303 and r.headers["location"] == "/freigaben?bw_hinweis=nicht_beworben#bewerbungen"
+    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis=nicht_beworben&bw_karte={BID}#karte-{BID}"
     assert falsch.aktionen()[-1] == ("POST", f"/bewerbungen/{BID}/nicht-bewerben",
                                      {"fassung": 1, "bindung": B, "von": "mira", "grund": "Zu weit weg"})
     _post(client, "nicht-bewerben", fassung="1", bindung=B, bestaetigt="ja", grund="   ")
@@ -559,7 +559,7 @@ def test_kennung_wird_im_pfad_maskiert(client, falsch):
 def test_veraltet_wird_als_hinweis_gezeigt(client, falsch, pfad, daten, grund, text):   # Review Focus 1
     falsch.fehler_post = PultFehler("abgelehnt", grund, {"detail": grund})
     r = _post(client, pfad, **daten)
-    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis={grund}#bewerbungen"
+    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis={grund}&bw_karte={BID}#karte-{BID}"
     s = _abschnitt(client, r.headers["location"])
     assert text in s
     for erfolg in ("freigegeben", "nicht_beworben", "feedback", "adresse_gespeichert", "weg_portal"):
@@ -571,7 +571,7 @@ def test_andere_ablehnung_ist_ein_allgemeiner_hinweis(client, falsch, grund):
     falsch.fehler_post = PultFehler("abgelehnt", grund)
     r = _post(client, "freigeben", fassung="1", bindung=B, bestaetigt="ja")
     assert r.status_code == 303 and r.headers["location"].startswith("/freigaben?bw_hinweis=abgelehnt")
-    assert r.headers["location"].endswith("#bewerbungen")
+    assert r.headers["location"].endswith(f"&bw_karte={BID}#karte-{BID}")
     s = _abschnitt(client, r.headers["location"])
     assert "nicht angenommen" in s and ui_freigabe_bewerbung._HINWEISE["freigegeben"][1] not in s
 
@@ -670,7 +670,7 @@ def test_feedback_schickt_text_nur_wenn_geaendert(client, falsch):
     wie_browser = "\r\n" + BRIEF.replace("\n", "\r\n") + "\r\n  "         # unveraendert abgeschickt
     r = _post(client, "feedback", fassung="1", original=original, kommentar=" Bitte kürzer ",
               text=wie_browser)
-    assert r.status_code == 303 and r.headers["location"] == "/freigaben?bw_hinweis=feedback#bewerbungen"
+    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis=feedback&bw_karte={BID}#karte-{BID}"
     assert falsch.aktionen()[-1] == ("POST", f"/bewerbungen/{BID}/feedback",
                                      {"fassung": 1, "von": "mira", "kommentar": "Bitte kürzer"})
     assert "Feedback erfasst" in _abschnitt(client, r.headers["location"])
@@ -681,7 +681,7 @@ def test_feedback_schickt_text_nur_wenn_geaendert(client, falsch):
     for kommentar, text in (("  ", wie_browser), ("", ""), ("\r\n", "  ")):
         r = _post(client, "feedback", fassung="1", original=original, kommentar=kommentar, text=text)
         assert r.status_code == 303
-        assert r.headers["location"] == "/freigaben?bw_hinweis=kein_feedback#bewerbungen"
+        assert r.headers["location"] == f"/freigaben?bw_hinweis=kein_feedback&bw_karte={BID}#karte-{BID}"
     assert len(falsch.aktionen()) == n
     assert "Kein Feedback eingegeben" in _abschnitt(client, r.headers["location"])
 
@@ -801,8 +801,8 @@ def test_ohne_kanal_kein_leeres_etikett(client, falsch):                        
     falsch.karten = [karte(kanal=""), karte(application_id=BID2, kanal=None, firma="Zwei")]
     s = _abschnitt(client)
     assert 'class="badge"></span>' not in s
-    assert "<summary><b>Muster GmbH – Data Engineer</b></summary>" in s
-    assert "<summary><b>Zwei – Data Engineer</b></summary>" in s
+    assert '<summary><b class="titel" title="Muster GmbH – Data Engineer">Muster GmbH – Data Engineer</b>' in s
+    assert '<summary><b class="titel" title="Zwei – Data Engineer">Zwei – Data Engineer</b>' in s
 
 
 def test_kaputte_karte_reisst_die_seite_nicht(client, falsch, caplog):             # F5, Review Focus 4
@@ -983,12 +983,12 @@ def test_etikett_folgt_dem_versandweg(client, falsch):
     ]
     s = _abschnitt(client)
     a, b, c, d, f, g = _karten(s)
-    assert '<summary><span class="badge">E-Mail</span><b>A – Data Engineer</b>' in a
-    assert '<summary><span class="badge">Portal</span><b>B – Data Engineer</b>' in b
-    assert '<summary><span class="badge">E-Mail</span><b>C – Data Engineer</b>' in c
-    assert '<summary><span class="badge">Portal</span><b>D – Data Engineer</b>' in d
-    assert '<span class="badge">&lt;script&gt;x&lt;/script&gt;</span><b>E – ' in f
-    assert '<summary><span class="badge">Portal</span><b>F – Data Engineer</b>' in g
+    assert '<summary><span class="badge">E-Mail</span><b class="titel" title="A – Data Engineer">A – Data Engineer</b>' in a
+    assert '<summary><span class="badge">Portal</span><b class="titel" title="B – Data Engineer">B – Data Engineer</b>' in b
+    assert '<summary><span class="badge">E-Mail</span><b class="titel" title="C – Data Engineer">C – Data Engineer</b>' in c
+    assert '<summary><span class="badge">Portal</span><b class="titel" title="D – Data Engineer">D – Data Engineer</b>' in d
+    assert '<span class="badge">&lt;script&gt;x&lt;/script&gt;</span><b class="titel" title="E – ' in f
+    assert '<summary><span class="badge">Portal</span><b class="titel" title="F – Data Engineer">F – Data Engineer</b>' in g
     assert "<script" not in s
 
 
@@ -1087,7 +1087,7 @@ def test_jedes_formular_hat_die_csrf_marke(client, falsch):
 def test_adressformular_reicht_fassung_kanal_an_von_weiter(client, falsch):
     r = _post(client, "versandziel", fassung="2", an="  Bewerbung@Muster.example \r\n")
     assert r.status_code == 303
-    assert r.headers["location"] == "/freigaben?bw_hinweis=adresse_gespeichert#bewerbungen"
+    assert r.headers["location"] == f"/freigaben?bw_hinweis=adresse_gespeichert&bw_karte={BID}#karte-{BID}"
     assert falsch.aktionen() == [("POST", f"/bewerbungen/{BID}/versandziel",
                                   {"fassung": 2, "kanal": "email", "an": "Bewerbung@Muster.example",
                                    "von": "mira"})]
@@ -1125,7 +1125,7 @@ def test_versandziel_prueft_die_fassung(client, falsch, fassung):
 
 def test_kein_email_weg_setzt_portal_ohne_adresse(client, falsch):
     r = _post(client, "versandziel", fassung="1", kanal="portal", an="ignoriert@x.example")
-    assert r.status_code == 303 and r.headers["location"] == "/freigaben?bw_hinweis=weg_portal#bewerbungen"
+    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis=weg_portal&bw_karte={BID}#karte-{BID}"
     assert falsch.aktionen() == [("POST", f"/bewerbungen/{BID}/versandziel",
                                   {"fassung": 1, "kanal": "portal", "von": "mira"})]
     assert "Portal" in _abschnitt(client, r.headers["location"])
@@ -1142,7 +1142,7 @@ def test_versandziel_andere_ablehnung_ist_ein_allgemeiner_hinweis(client, falsch
     falsch.fehler_post = PultFehler("abgelehnt", grund)
     r = _post(client, "versandziel", fassung="1", an=ADRESSE)
     assert r.status_code == 303
-    assert r.headers["location"] == f"/freigaben?bw_hinweis=abgelehnt&bw_grund={grund}#bewerbungen"
+    assert r.headers["location"] == f"/freigaben?bw_hinweis=abgelehnt&bw_grund={grund}&bw_karte={BID}#karte-{BID}"
     s = _abschnitt(client, r.headers["location"])
     assert "nicht angenommen" in s and ui_freigabe_bewerbung._HINWEISE["adresse_gespeichert"][1] not in s
 
@@ -1160,7 +1160,7 @@ def test_freigeben_schickt_das_angezeigte_versand_an(client, falsch):
     falsch.karten = [karte(versand=weg())]
     seite = client.get(SEITE).text
     r = _post(client, "freigeben", fassung="1", bindung=B, bestaetigt="ja", versand_an=_wert(seite, "versand_an"))
-    assert r.status_code == 303 and r.headers["location"] == "/freigaben?bw_hinweis=freigegeben#bewerbungen"
+    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis=freigegeben&bw_karte={BID}#karte-{BID}"
     assert falsch.aktionen() == [("POST", f"/bewerbungen/{BID}/freigeben",
                                   {"fassung": 1, "bindung": B, "von": "mira", "versand_an": ADRESSE})]
     assert falsch.im_loop == []
@@ -1202,7 +1202,7 @@ def test_adresse_geaendert_ist_ein_hinweis_nie_eine_erfolgsmeldung(client, falsc
     falsch.fehler_post = PultFehler("abgelehnt", "versandziel_geaendert", {"detail": "versandziel_geaendert"})
     r = _post(client, "freigeben", fassung="1", bindung=B, bestaetigt="ja", versand_an=ADRESSE)
     assert r.status_code == 303
-    assert r.headers["location"] == "/freigaben?bw_hinweis=versandziel_geaendert#bewerbungen"
+    assert r.headers["location"] == f"/freigaben?bw_hinweis=versandziel_geaendert&bw_karte={BID}#karte-{BID}"
     s = _abschnitt(client, r.headers["location"])
     assert '<div class="warnung">Bewerbungsadresse hat sich geändert – Seite neu laden</div>' in s
     assert ui_freigabe_bewerbung._HINWEISE["freigegeben"][1] not in s
@@ -1880,7 +1880,7 @@ def test_antworten_senden_nur_nicht_leere_felder(client, falsch):
     r = _post(client, "antworten", fassung="2", antwort_f1="  ab sofort  ", antwort_f2="",
               antwort_f3="   ", antwort_f4="40 h")
     assert r.status_code == 303
-    assert r.headers["location"] == "/freigaben?bw_hinweis=antworten_erfasst#bewerbungen"
+    assert r.headers["location"] == f"/freigaben?bw_hinweis=antworten_erfasst&bw_karte={BID}#karte-{BID}"
     assert falsch.aktionen() == [("POST", f"/bewerbungen/{BID}/antworten", {
         "fassung": 2, "von": "mira",
         "antworten": [{"frage_id": "f1", "antwort": "ab sofort"}, {"frage_id": "f4", "antwort": "40 h"}]})]
@@ -1907,14 +1907,14 @@ def test_antworten_aus_dem_gerenderten_formular(client, falsch):
 def test_antworten_alle_leer_ist_ein_hinweis_ohne_aufruf(client, falsch):
     for daten in ({}, {"antwort_f1": ""}, {"antwort_f1": "  ", "antwort_f2": "\r\n"}, {"quatsch": "x"}):
         r = _post(client, "antworten", fassung="1", **daten)
-        assert r.status_code == 303 and r.headers["location"] == "/freigaben?bw_hinweis=keine_antwort#bewerbungen"
+        assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis=keine_antwort&bw_karte={BID}#karte-{BID}"
     assert falsch.aktionen() == []
     assert "Keine Antwort eingegeben" in _abschnitt(client, "/freigaben?bw_hinweis=keine_antwort")
 
 
 def test_antworten_grenzen_und_einzeilig(client, falsch):
     r = _post(client, "antworten", fassung="1", antwort_f1="x" * 500)
-    assert r.status_code == 303 and r.headers["location"].endswith("antworten_erfasst#bewerbungen")
+    assert r.status_code == 303 and r.headers["location"].endswith(f"antworten_erfasst&bw_karte={BID}#karte-{BID}")
     assert falsch.aktionen()[-1][2]["antworten"] == [{"frage_id": "f1", "antwort": "x" * 500}]
     r = _post(client, "antworten", fassung="1", antwort_f1="  ok \r\n")        # Rand-Leerraum faellt weg
     assert falsch.aktionen()[-1][2]["antworten"] == [{"frage_id": "f1", "antwort": "ok"}]
@@ -1922,7 +1922,7 @@ def test_antworten_grenzen_und_einzeilig(client, falsch):
     for zu_lang_oder_mehrzeilig in ("x" * 501, "zwei\nZeilen", "zwei\r\nZeilen", "zwei\rZeilen"):
         r = _post(client, "antworten", fassung="1", antwort_f1="gut", antwort_f2=zu_lang_oder_mehrzeilig)
         assert r.status_code == 303
-        assert r.headers["location"] == "/freigaben?bw_hinweis=antwort_ungueltig#bewerbungen"
+        assert r.headers["location"] == f"/freigaben?bw_hinweis=antwort_ungueltig&bw_karte={BID}#karte-{BID}"
     assert len(falsch.aktionen()) == n                       # nichts davon geht an die Zentrale (alle oder keine)
     assert "Antwort ungültig – höchstens 500 Zeichen." in _abschnitt(client, "/freigaben?bw_hinweis=antwort_ungueltig")
 
@@ -1962,7 +1962,7 @@ def test_antworten_hoechstens_fuenf_und_keine_doppelten(client, falsch):
 def test_antworten_ablehnung_wird_als_hinweis_gezeigt(client, falsch, grund, text):
     falsch.fehler_post = PultFehler("abgelehnt", grund, {"detail": grund})
     r = _post(client, "antworten", fassung="1", antwort_f1="Ja")
-    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis={grund}#bewerbungen"
+    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis={grund}&bw_karte={BID}#karte-{BID}"
     s = _abschnitt(client, r.headers["location"])
     assert f'<div class="warnung">{text}</div>' in s
     assert ui_freigabe_bewerbung._HINWEISE["antworten_erfasst"][1] not in s
@@ -2516,7 +2516,7 @@ STOPPEN = {"fassung": "1", "bindung": B, "bestaetigt": "ja"}
 
 def test_stoppen_geht_als_nicht_bewerben_mit_grund_an_die_zentrale(client, falsch):
     r = _post(client, "stoppen", **STOPPEN, grund="  Stelle ist inzwischen besetzt \r\n")
-    assert r.status_code == 303 and r.headers["location"] == "/freigaben?bw_hinweis=gestoppt#bewerbungen"
+    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis=gestoppt&bw_karte={BID}#karte-{BID}"
     assert falsch.aktionen() == [("POST", f"/bewerbungen/{BID}/nicht-bewerben",
                                   {"fassung": 1, "bindung": B, "von": "mira", "grund": "Stelle ist inzwischen besetzt"})]
     assert falsch.im_loop == [] and falsch.zeitlimits[-1] == ("POST", f"/bewerbungen/{BID}/nicht-bewerben", 30)
@@ -2527,7 +2527,7 @@ def test_stoppen_geht_als_nicht_bewerben_mit_grund_an_die_zentrale(client, falsc
 @pytest.mark.parametrize("daten", [{}, {"grund": ""}, {"grund": "   "}, {"grund": "\r\n"}, {"grund": " \t "}])
 def test_stoppen_ohne_grund_sendet_nichts(client, falsch, daten):
     r = _post(client, "stoppen", **STOPPEN, **daten)
-    assert r.status_code == 303 and r.headers["location"] == "/freigaben?bw_hinweis=grund_fehlt#bewerbungen"
+    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis=grund_fehlt&bw_karte={BID}#karte-{BID}"
     assert falsch.aktionen() == []
     s = _abschnitt(client, r.headers["location"])
     assert ('<div class="warnung">Kein Grund eingegeben – zum Stoppen ist ein Grund nötig. '
@@ -2592,7 +2592,7 @@ def test_stoppen_unklare_antwort_ist_unklar(client, falsch):
 def test_stoppen_ablehnung_wird_als_hinweis_gezeigt(client, falsch, grund, text):
     falsch.fehler_post = PultFehler("abgelehnt", grund, {"detail": grund})
     r = _post(client, "stoppen", **STOPPEN, grund="Besetzt")
-    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis={grund}#bewerbungen"
+    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis={grund}&bw_karte={BID}#karte-{BID}"
     s = _abschnitt(client, r.headers["location"])
     assert text in s and ui_freigabe_bewerbung._HINWEISE["gestoppt"][1] not in s
 
@@ -2947,7 +2947,7 @@ AKTIONEN = [
 @pytest.mark.parametrize("aktion,form,json,hinweis", AKTIONEN)
 def test_portal_aktionen_senden_richtiges_json(client, falsch, aktion, form, json, hinweis):
     r = _ppost(client, aktion, lauf_id=LAUF_P, **form)
-    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis={hinweis}#bewerbungen"
+    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis={hinweis}&bw_karte={BID}#karte-{BID}"
     assert falsch.aktionen() == [("POST", f"/bewerbungen/{BID}/portal/{aktion}", json)]
     assert falsch.im_loop == []
     assert ui_freigabe_bewerbung._HINWEISE[hinweis][1] in _abschnitt(client, r.headers["location"])
@@ -2984,7 +2984,7 @@ PORTAL_POSTS = [("antworten", {"antwort_gehalt-wunsch": "1"}), ("ausgang", {"aus
 def test_portal_ablehnungen_werden_hinweise(client, falsch, aktion, form, code):
     falsch.fehler_post = PultFehler("abgelehnt", code, {"detail": code})
     r = _ppost(client, aktion, lauf_id=LAUF_P, **form)
-    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis={code}#bewerbungen"
+    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis={code}&bw_karte={BID}#karte-{BID}"
     klasse, text = ui_freigabe_bewerbung._HINWEISE[code]
     assert f'<div class="{klasse}">{text}</div>' in _abschnitt(client, r.headers["location"])
 
@@ -3006,7 +3006,7 @@ def test_befehl_nicht_geschrieben_ist_kein_sonderfall_mehr(client, falsch):
 def test_nicht_raus_akzeptiert_selbst_bewerben(client, falsch, status):
     falsch.antwort_ausgang_nicht_raus = {"status": status}
     r = _ppost(client, "ausgang", lauf_id=LAUF_P, ausgang="nicht_raus")
-    assert r.status_code == 303 and r.headers["location"] == "/freigaben?bw_hinweis=portal_erfasst#bewerbungen"
+    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis=portal_erfasst&bw_karte={BID}#karte-{BID}"
     falsch.antwort_ausgang_nicht_raus = {"status": "was-anderes"}
     assert _ppost(client, "ausgang", lauf_id=LAUF_P, ausgang="nicht_raus").status_code == 504
 
@@ -3066,7 +3066,7 @@ def test_selbst_abgeschickt_braucht_haken(client, falsch):
     assert r.status_code == 400 and "Der Bestätigungshaken fehlt. Nichts wurde gesendet." in r.text
     assert falsch.aktionen() == []
     r = _ppost(client, "ausgang", lauf_id=LAUF_P, ausgang="raus", selbst="ja", bestaetigt="ja")
-    assert r.status_code == 303 and r.headers["location"] == "/freigaben?bw_hinweis=abgeschickt#bewerbungen"
+    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis=abgeschickt&bw_karte={BID}#karte-{BID}"
     assert falsch.aktionen() == [("POST", f"/bewerbungen/{BID}/portal/ausgang",
                                   {"lauf_id": LAUF_P, "von": "mira", "ausgang": "raus"})]
 
@@ -3109,7 +3109,7 @@ def test_ausgang_aus_wartet_und_frage_offen(client, falsch, zustand):
 
 def test_antworten_ohne_inhalt_ruft_nichts(client, falsch):
     r = _ppost(client, "antworten", lauf_id=LAUF_P, **{"antwort_gehalt-wunsch": "  ", "fremd": "x"})
-    assert r.status_code == 303 and r.headers["location"] == "/freigaben?bw_hinweis=keine_antwort#bewerbungen"
+    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis=keine_antwort&bw_karte={BID}#karte-{BID}"
     assert falsch.aktionen() == []
 
 
@@ -3693,7 +3693,7 @@ def test_neue_ablehnungscodes_haben_hinweis(client, falsch, code):
     assert ui_freigabe_bewerbung._HINWEISE[code][0] == "warnung"
     falsch.fehler_post = PultFehler("abgelehnt", code)
     r = _post(client, "feedback", fassung="1", kommentar="x")
-    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis={code}#bewerbungen"
+    assert r.status_code == 303 and r.headers["location"] == f"/freigaben?bw_hinweis={code}&bw_karte={BID}#karte-{BID}"
     assert ui_freigabe_bewerbung._HINWEISE[code][1] in _abschnitt(client, r.headers["location"])
 
 
@@ -3709,3 +3709,220 @@ def test_feedback_hinweis_nennt_hermes(client, falsch):
     art, text = ui_freigabe_bewerbung._HINWEISE["feedback"]
     assert art == "hinweis" and "Durchsicht" not in text
     assert text == "Feedback erfasst – Hermes überarbeitet die Fassung, in ein paar Minuten liegt die neue hier."
+
+
+def test_karte_ist_eine_zugeklappte_zeile(client, falsch):
+    s = _abschnitt(client)
+    assert f'<details class="karte" id="karte-{BID}"><summary><span class="badge">E-Mail</span>' in s
+    assert ('<b class="titel" title="Muster GmbH – Data Engineer">Muster GmbH – Data Engineer</b>'
+            '<span class="stand">Freigabe nötig</span></summary>') in s
+    assert 'class="karte" open' not in s and " open><summary>" not in s
+    assert "Kein Spark-Projekt" in s            # der Inhalt ist noch da, nur zugeklappt
+
+
+def test_kennung_im_id_attribut_ist_maskiert(client, falsch):
+    falsch.karten = [karte(application_id=BOESE2)]
+    s = _abschnitt(client)
+    assert BOESE2 not in s and f'id="karte-{html.escape(BOESE2, quote=True)}"' in s
+
+
+@pytest.mark.parametrize(("felder", "not_aus", "erwartet"), [
+    ({}, False, ("", "Freigabe nötig")),
+    ({"wartet_auf_durchsicht": True}, False, ("", "Wartet auf Durchsicht")),
+    ({"ueberarbeitung": {"stand": "laeuft"}}, False, ("", "Feedback läuft")),
+    ({"ueberarbeitung": {"stand": "gescheitert"}}, False, ("warn", "Überarbeitung gescheitert")),
+    ({"ueberarbeitung": {"stand": "abgelehnt"}}, False, ("warn", "Feedback nicht umsetzbar")),
+    ({"autonom": {"stand": "empfaenger_pruefen"}}, False, ("warn", "Empfänger prüfen")),
+    ({"versand": {"kanal": "email", "an": "a@example.org", "warnung": "Freemail"}}, False,
+     ("warn", "Empfänger prüfen")),
+    ({"autonom": {"stand": "bereit", "faellig_am": None}}, True, ("warn", "bereit · Not-Aus hält")),
+    ({"autonom": {"stand": "bereit", "faellig_am": None}}, False, ("", "bereit")),
+    ({"autonom": {"stand": "bereit", "faellig_am": "2026-10-30T13:30:00+00:00"}}, False,
+     ("", "bereit · geht 14:30 (30.10.) raus")),
+    ({"autonom": {"stand": "offene_fragen"}}, False, ("", "Fragen offen")),
+    ({"autonom": {"stand": "feedback_offen"}}, False, ("", "Feedback läuft")),
+    ({"autonom": {"stand": "nach_feedback"}}, False, ("", "Freigabe nötig")),
+    ({"autonom": {"stand": "kaputt"}}, False, None),
+    ({"wartet_auf_durchsicht": True, "autonom": {"stand": "empfaenger_pruefen"}}, False,
+     ("warn", "Empfänger prüfen")),
+])
+def test_kurzstand_unterlagen(felder, not_aus, erwartet):
+    assert ui_freigabe_bewerbung._kurzstand(ui, karte(**felder), not_aus) == erwartet
+
+
+@pytest.mark.parametrize(("felder", "erwartet"), [
+    ({"zustand": "offline"}, ("warn", "Anzeige offline")),
+    ({"zustand": "unklar"}, ("warn", "Unklar, ob abgeschickt")),
+    ({"zustand": "wartet_auf_worker", "worker": {"laeuft": False, "seit": None}}, ("warn", "Bot läuft nicht")),
+    ({"zustand": "wartet_auf_worker"}, ("", "Bot liest das Formular")),
+    ({"zustand": "bereit", "hindernis": "captcha"}, ("warn", "bereit · Hindernis")),
+    ({"zustand": "bereit", "briefdatum_alter_tage": 8}, ("warn", "bereit · Datum prüfen")),
+    ({"zustand": "bereit"}, ("", "bereit")),
+    ({"zustand": "frage_offen"}, ("", "Fragen offen")),
+    ({"zustand": "selbst_bewerben", "grund": "captcha"}, ("warn", "Selbst bewerben")),
+    ({"zustand": "selbst_bewerben", "grund": "felix"}, ("", "Selbst bewerben")),
+    ({"zustand": "nix"}, None),
+])
+def test_kurzstand_portal(felder, erwartet):
+    assert ui_freigabe_bewerbung._portal_kurzstand(ui, pkarte(**felder)) == erwartet
+
+
+def test_portal_karte_ist_eine_zugeklappte_zeile(client, falsch):
+    falsch.karten = [pkarte(zustand="unklar")]
+    s = _abschnitt(client)
+    assert (f'<details class="karte" id="karte-{BID}"><summary><span class="badge">Portal</span>'
+            '<b class="titel" title="Muster GmbH – Data Engineer">Muster GmbH – Data Engineer</b>'
+            '<span class="stand warn">Unklar, ob abgeschickt</span></summary>') in s
+
+
+def test_zeile_hat_eigenes_css(client, falsch):
+    r = client.get(SEITE)
+    assert "#bewerbungen details.karte > summary .titel {" in r.text
+    assert "#bewerbungen details.karte > summary .stand.warn {" in r.text
+
+
+# --- Die bearbeitete Karte ist nach dem Neuladen wieder offen (Plan 2026-11-21, Task 2) -----------------
+
+
+def test_freigeben_springt_zur_karte(client, falsch):
+    r = _post(client, "freigeben", fassung="1", bindung=B, bestaetigt="ja")
+    assert r.status_code == 303
+    assert r.headers["location"] == f"/freigaben?bw_hinweis=freigegeben&bw_karte={BID}#karte-{BID}"
+
+
+def test_abgelehnt_mit_grund_springt_zur_karte(client, falsch):
+    grund = "eingabe_ungueltig"
+    falsch.fehler_post = PultFehler("abgelehnt", grund)
+    r = _post(client, "freigeben", fassung="1", bindung=B, bestaetigt="ja")
+    assert r.status_code == 303
+    assert r.headers["location"] == (
+        f"/freigaben?bw_hinweis=abgelehnt&bw_grund={grund}&bw_karte={BID}#karte-{BID}")
+
+
+def test_lauf_und_not_aus_bleiben_beim_abschnitt(client, falsch):
+    r = _post_lauf(client, "lauf")
+    assert r.headers["location"] == "/freigaben?bw_hinweis=lauf_gestartet#bewerbungen"
+    r = _post_not_aus(client, "setzen")
+    assert r.headers["location"] == "/freigaben?bw_hinweis=not_aus_gesetzt#bewerbungen"
+
+
+def test_kennung_ausserhalb_des_musters_springt_nicht(client, falsch):
+    r = client.post("/freigaben/bewerbung/b%22x/freigeben",
+                    data={"csrf": ui.CSRF_TOKEN, "fassung": "1", "bindung": B, "bestaetigt": "ja"},
+                    follow_redirects=False)
+    assert r.status_code in (303, 422)
+    if r.status_code == 303:
+        assert r.headers["location"].endswith("#bewerbungen") and "bw_karte" not in r.headers["location"]
+
+
+def test_bw_karte_oeffnet_genau_diese_karte_mit_meldung(client, falsch):
+    falsch.karten = [karte(), karte(application_id=BID2, firma="Zweit AG")]
+    s = _abschnitt(client, f"/freigaben?bw_hinweis=schon_entschieden&bw_karte={BID}")
+    assert f'<details class="karte" id="karte-{BID}" open><summary>' in s
+    assert f'<details class="karte" id="karte-{BID2}"><summary>' in s
+    innen = s.split(f'id="karte-{BID}" open><summary>')[1].split("</summary>", 1)[1]
+    assert innen.startswith('<div class="warnung">Schon entschieden – Seite neu laden.</div>')
+    assert s.count("Schon entschieden – Seite neu laden.") == 2
+
+
+def test_bw_karte_oeffnet_auch_die_portal_karte(client, falsch):
+    falsch.karten = [pkarte()]
+    s = _abschnitt(client, f"/freigaben?bw_hinweis=portal_erfasst&bw_karte={BID}")
+    assert f'<details class="karte" id="karte-{BID}" open><summary>' in s
+    innen = s.split(f'id="karte-{BID}" open><summary>')[1].split("</summary>", 1)[1]
+    assert innen.startswith('<div class="')
+
+
+def test_portal_aktion_springt_zur_karte(client, falsch):
+    falsch.karten = [pkarte()]
+    r = _ppost(client, "am-pc", lauf_id=LAUF_P, am_pc="true")
+    assert r.status_code == 303
+    assert r.headers["location"].endswith(f"&bw_karte={BID}#karte-{BID}")
+
+
+@pytest.mark.parametrize("wert", ["bw-9999", BOESE, BOESE2, "x" * 81, ""])
+def test_bw_karte_fremd_oder_boese_oeffnet_nichts(client, falsch, wert):
+    s = _abschnitt(client, "/freigaben?bw_karte=" + urllib.parse.quote(wert))
+    assert " open><summary>" not in s
+    assert BOESE not in s and "onerror=1" not in s
+
+
+PRUEF = {"letzte": "weg", "code": "410", "geprueft_am": "2026-10-30T07:00:00+00:00",
+         "offline": False, "naechste_ab": "2026-10-30T13:00:00+00:00"}
+
+
+def test_rote_zeile_wenn_anzeige_offline():
+    assert ui_freigabe_bewerbung._kurzstand(ui, karte(anzeige=dict(PRUEF, offline=True)), False) == (
+        "warn", "Anzeige offline")
+    assert ui_freigabe_bewerbung._portal_kurzstand(ui, dict(pkarte(), anzeige=dict(PRUEF, offline=True))) == (
+        "warn", "Anzeige offline")
+
+
+def test_portal_wieder_online_ist_neutral():
+    k = dict(pkarte(), anzeige=dict(PRUEF, letzte="online", code="200"))
+    assert ui_freigabe_bewerbung._portal_kurzstand(ui, k) == ("", "bereit")
+
+
+@pytest.mark.parametrize(("pruef", "text"), [
+    (dict(PRUEF, offline=True), '<div class="warnung">Anzeige offline (410)</div>'),
+    (PRUEF, '<p class="meta">Anzeige meldet 410 – zweite Prüfung ab 14:00 (30.10.)</p>'),
+    (dict(PRUEF, letzte="online", code="200"), '<p class="meta">Anzeige online (geprüft 08:00 (30.10.))</p>'),
+    (dict(PRUEF, letzte=None, code=None), '<p class="meta">Anzeige ließ sich nicht prüfen (geprüft 08:00 (30.10.))</p>'),
+    (dict(PRUEF, code="<b>"), '<p class="meta">Anzeige scheint offline – zweite Prüfung ab 14:00 (30.10.)</p>'),
+    (dict(PRUEF, offline=True, code=None), '<div class="warnung">Anzeige offline</div>'),
+])
+def test_pruefzeile(pruef, text):
+    assert ui_freigabe_bewerbung._pruefzeile(ui, karte(anzeige=pruef)) == text
+
+
+def test_online_zeile_nimmt_die_zeit_des_eindeutigen_ergebnisses():
+    # geprueft_am 20:00 (UTC) war unklar; entschieden hat die Pruefung um 08:00.
+    k = karte(anzeige=dict(PRUEF, letzte="online", code="200", geprueft_am="2026-10-30T20:00:00+00:00",
+                           eindeutig_am="2026-10-30T07:00:00+00:00"))
+    assert ui_freigabe_bewerbung._pruefzeile(ui, k) == '<p class="meta">Anzeige online (geprüft 08:00 (30.10.))</p>'
+
+
+@pytest.mark.parametrize("eindeutig", [None, "", "kaputt", 5])
+def test_online_zeile_ohne_lesbares_eindeutig_am_wie_bisher(eindeutig):
+    k = karte(anzeige=dict(PRUEF, letzte="online", code="200", geprueft_am="2026-10-30T20:00:00+00:00",
+                           eindeutig_am=eindeutig))
+    assert ui_freigabe_bewerbung._pruefzeile(ui, k) == '<p class="meta">Anzeige online (geprüft 21:00 (30.10.))</p>'
+
+
+def test_unklar_zeile_bleibt_bei_geprueft_am():
+    k = karte(anzeige=dict(PRUEF, letzte=None, code=None, geprueft_am="2026-10-30T20:00:00+00:00",
+                           eindeutig_am="2026-10-30T07:00:00+00:00"))
+    assert "geprüft 21:00" in ui_freigabe_bewerbung._pruefzeile(ui, k)
+
+
+def test_seite_zeigt_anzeige_offline_in_kopf_und_pruefzeile(client, falsch):
+    falsch.karten = [karte(anzeige=dict(PRUEF, offline=True)),
+                     dict(pkarte(), application_id="bw-5000", anzeige=dict(PRUEF, offline=True))]
+    u, p = _karten(_abschnitt(client))[:2]
+    for text in (u, p):
+        kopf = text.split("</summary>")[0]
+        assert '<span class="stand warn">Anzeige offline</span>' in kopf
+        zeile = '<div class="warnung">Anzeige offline (410)</div>'
+        assert zeile in text
+        meta = text.index('<div class="meta">')
+        assert text[meta:].split("</div>", 1)[1].startswith(zeile)
+
+
+def test_ohne_anzeige_feld_wie_teil_1(client, falsch):
+    s = _abschnitt(client)
+    assert "Anzeige meldet" not in s and "Anzeige online" not in s and "Anzeige offline" not in s
+
+
+def test_verlauf_zeigt_den_abbruch(client, falsch):
+    falsch.verlauf = [verlauf(entscheidung="reject", grund="anzeige_offline", anzeige_status=410,
+                              von="zentrale:anzeige", anzeige_url="https://jobs.example.org/4711")]
+    s = _abschnitt(client)
+    assert "Abgebrochen – Anzeige offline (410)" in s and "Anzeige ↗" in s
+    assert "von zentrale:anzeige" not in s
+
+
+@pytest.mark.parametrize("status", [True, "410", 9999, None])
+def test_verlauf_abbruch_ohne_gueltigen_code(client, falsch, status):
+    falsch.verlauf = [verlauf(entscheidung="reject", grund="anzeige_offline", anzeige_status=status)]
+    s = _abschnitt(client)
+    assert "Abgebrochen – Anzeige offline" in s and "Abgebrochen – Anzeige offline (" not in s

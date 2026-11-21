@@ -146,6 +146,8 @@ _ANTWORT_PRAEFIX = "antwort_"
 # Kennung einer Frage (die Zentrale vergibt f1 .. f5): nur so etwas wird Feldname und Pfadteil.
 _FRAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,40}")
 _FASSUNG = re.compile(r"[1-9][0-9]{0,8}")
+# Die Kennung einer Karte im Link (`bw_karte`): nur sie darf eine Karte oeffnen und ins Ziel der Weiterleitung.
+_KARTE = re.compile(r"[A-Za-z0-9_-]{1,80}")
 _BINDUNG = re.compile(r"sha256:[0-9a-fA-F]{64}")
 _NICHT_VON = re.compile(r"[^A-Za-z0-9_.@-]")
 _ADRESSE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -827,11 +829,112 @@ def _portal_inhalt(ui, k: dict, p: dict, basis: str, nr, lauf_id: str) -> str:
     return '<p class="meta">Stand unbekannt – Seite neu laden.</p>'
 
 
+def _pruefung(k: dict) -> dict | None:
+    """Der Pruefstand der Anzeige aus der Zentrale (Teil 2): das dict oder None (fehlt, None oder kein dict)."""
+    p = k.get("anzeige")
+    return p if isinstance(p, dict) else None
+
+
+def _pruefzeile(ui, k: dict) -> str:
+    """Die Zeile zum Pruefstand der Anzeige in der aufgeklappten Karte; ohne Pruefstand "". Der erste Treffer gilt.
+    Der Code erscheint nur als genau drei ASCII-Ziffern, die Uhrzeit nur, wenn sie lesbar ist."""
+    p = _pruefung(k)
+    if p is None:
+        return ""
+    code = p.get("code")
+    code = code if isinstance(code, str) and re.fullmatch(r"[0-9]{3}", code, re.ASCII) else None
+    if p.get("offline") is True:
+        return f'<div class="warnung">Anzeige offline{f" ({code})" if code else ""}</div>'
+    if p.get("letzte") == "weg":
+        uhr = _in_ortszeit(p.get("naechste_ab"), lambda z: _uhrzeit(ui, z))
+        text = f"Anzeige meldet {code} – zweite Prüfung" if code else "Anzeige scheint offline – zweite Prüfung"
+        return f'<p class="meta">{text}{f" ab {uhr}" if uhr else ""}</p>'
+    uhr = None
+    if p.get("letzte") == "online":  # die Zeit des eindeutigen Ergebnisses, nicht die einer unklaren Prüfung danach
+        uhr = _in_ortszeit(p.get("eindeutig_am"), lambda z: _uhrzeit(ui, z))
+    uhr = uhr or _in_ortszeit(p.get("geprueft_am"), lambda z: _uhrzeit(ui, z))
+    teil = f" (geprüft {uhr})" if uhr else ""
+    if p.get("letzte") == "online":
+        return f'<p class="meta">Anzeige online{teil}</p>'
+    return f'<p class="meta">Anzeige ließ sich nicht prüfen{teil}</p>'
+
+
+def _kurzstand(ui, k: dict, not_aus: bool) -> tuple[str, str] | None:
+    """Der kurze Stand in der zugeklappten Zeile einer Unterlagen-Karte: (Klasse, Text), Klasse "" oder "warn".
+    Warnungen gehen vor neutrale Stände; ein unbekannter Autonomie-Stand zeigt nichts (None)."""
+    if (pruefung := _pruefung(k)) is not None and pruefung.get("offline") is True:
+        return "warn", "Anzeige offline"
+    ue = _ueberarbeitung(k)
+    a = k.get("autonom")
+    stand = a.get("stand") if isinstance(a, dict) else None
+    v = k.get("versand")
+    if ue == "gescheitert":
+        return "warn", "Überarbeitung gescheitert"
+    if ue == "abgelehnt":
+        return "warn", "Feedback nicht umsetzbar"
+    if stand == "empfaenger_pruefen" or (isinstance(v, dict) and _nur_text(v.get("warnung"))):
+        return "warn", "Empfänger prüfen"
+    if stand == "bereit" and not_aus:
+        return "warn", "bereit · Not-Aus hält"
+    if k.get("wartet_auf_durchsicht"):
+        return "", "Wartet auf Durchsicht"
+    if ue in ("wartet", "laeuft") or stand == "feedback_offen":
+        return "", "Feedback läuft"
+    if stand == "bereit":
+        uhr = _in_ortszeit(a.get("faellig_am"), lambda z: _uhrzeit(ui, z))
+        return "", f"bereit · geht {uhr} raus" if uhr else "bereit"
+    if stand == "offene_fragen":
+        return "", "Fragen offen"
+    if not isinstance(a, dict) or stand == "nach_feedback":
+        return "", "Freigabe nötig"
+    return None
+
+
+def _portal_kurzstand(ui, k: dict) -> tuple[str, str] | None:
+    """Der kurze Stand in der zugeklappten Zeile einer Portal-Karte (Klasse, Text); ein unbekannter Zustand: None."""
+    p = k["portal"]
+    zustand = p.get("zustand")
+    if (pruefung := _pruefung(k)) is not None and pruefung.get("offline") is True:
+        return "warn", "Anzeige offline"
+    if zustand == "offline":
+        return "warn", "Anzeige offline"
+    if zustand == "unklar":
+        return "warn", "Unklar, ob abgeschickt"
+    if zustand == "wartet_auf_worker" and _bot_laeuft_nicht(p):
+        return "warn", _BOT_LAEUFT_NICHT
+    if zustand == "bereit":
+        hindernis = p.get("hindernis") if isinstance(p.get("hindernis"), str) else None
+        if hindernis not in _KEIN_HINDERNIS:
+            return "warn", "bereit · Hindernis"
+        tage = p.get("briefdatum_alter_tage")
+        if isinstance(tage, int) and not isinstance(tage, bool) and tage >= BRIEFDATUM_HINWEIS_AB_TAGE:
+            return "warn", "bereit · Datum prüfen"
+    if zustand == "selbst_bewerben":
+        grund = p.get("grund")
+        klasse = PORTAL_GRUENDE.get(grund if isinstance(grund, str) else "", PORTAL_GRUENDE["unbekannt"])[0]
+        return ("warn" if klasse == "warnung" else ""), "Selbst bewerben"
+    if isinstance(zustand, str) and zustand in PORTAL_ZUSTAENDE:
+        return "", PORTAL_ZUSTAENDE[zustand]
+    return None
+
+
+def _kopf(ui, k: dict, etikett: str, stand: tuple[str, str] | None, *, offen: bool = False) -> str:
+    """Die Kopfzeile einer Karte bis einschliesslich `</summary>`: Etikett, "Firma – Rolle", kurzer Stand.
+    Die Karte ist zugeklappt, `offen` klappt sie auf. Ohne Kennung als Text gibt es kein `id`."""
+    e = ui._e
+    kennung = k.get("application_id")
+    marke = f' id="karte-{e(kennung)}"' if isinstance(kennung, str) else ""
+    titel = f'{e(k.get("firma"))} – {e(k.get("rolle"))}'
+    zeile = f'<span class="stand{" warn" if stand[0] == "warn" else ""}">{e(stand[1])}</span>' if stand else ""
+    return (f'<details class="karte"{marke}{" open" if offen else ""}><summary>{etikett}'
+            f'<b class="titel" title="{titel}">{titel}</b>{zeile}</summary>')
+
+
 # Nur in diesen Zuständen ist sicher, dass noch nichts abgeschickt ist: nur dann nimmt die Portal-Karte Feedback an.
 _PORTAL_FEEDBACK_ZUSTAENDE = ("selbst_bewerben", "bereit", "frage_offen", "wartet_auf_worker", "offline")
 
 
-def _portal_karte(ui, k: dict) -> str:
+def _portal_karte(ui, k: dict, *, offen: bool = False, meldung: str = "") -> str:
     """Die Karte einer Portal-Bewerbung (`k["portal"]` ist ein dict): Kopf wie bei den Unterlagen, darunter je
     nach Zustand des Laufs Direktlink, Feldtabelle, Fragen und Knoepfe. Kein Freigeben der Unterlagen."""
     e = ui._e
@@ -851,9 +954,9 @@ def _portal_karte(ui, k: dict) -> str:
         inhalt = '<p class="meta">Lauf unbekannt – Seite neu laden.</p>'
     if p.get("zustand") in _PORTAL_FEEDBACK_ZUSTAENDE and not inhalt.startswith('<p class="meta">Lauf unbekannt'):
         inhalt += _feedback_formular(ui, k, basis, nr, unterlagen=False)
-    return (f'<details class="karte" open><summary><span class="badge">Portal</span>'
-            f'<b>{e(k.get("firma"))} – {e(k.get("rolle"))}</b></summary>'
-            f'<div class="meta">{" · ".join(angaben)}</div>{verweise}{_abweichungen(ui, k)}{inhalt}</details>')
+    kopf = _kopf(ui, k, '<span class="badge">Portal</span>', _portal_kurzstand(ui, k), offen=offen)
+    return (f'{kopf}{meldung}<div class="meta">{" · ".join(angaben)}</div>{_pruefzeile(ui, k)}{verweise}'
+            f'{_abweichungen(ui, k)}{inhalt}</details>')
 
 
 def _portal_kopf(ui, karten: list[dict]) -> str:
@@ -877,9 +980,9 @@ def _portal_kopf(ui, karten: list[dict]) -> str:
     return "".join(teile)
 
 
-def _karte(ui, k: dict, not_aus: bool = False) -> str:
+def _karte(ui, k: dict, not_aus: bool = False, *, offen: bool = False, meldung: str = "") -> str:
     if isinstance(k.get("portal"), dict):
-        return _portal_karte(ui, k)
+        return _portal_karte(ui, k, offen=offen, meldung=meldung)
     e = ui._e
     basis = _basis(k)
     nr = _nr(k.get("fassung"))
@@ -944,9 +1047,8 @@ def _karte(ui, k: dict, not_aus: bool = False) -> str:
     weg = k.get("versand") if isinstance(k.get("versand"), dict) else {}
     kanal = _nur_text(weg.get("kanal")) or k.get("kanal")
     etikett = f'<span class="badge">{e(_label(KANAELE, kanal))}</span>' if kanal else ""
-    return (f'<details class="karte" open><summary>{etikett}'
-            f'<b>{e(k.get("firma"))} – {e(k.get("rolle"))}</b></summary>'
-            f'<div class="meta">{" · ".join(angaben)}</div>{autonom_zeile}{luecke}'
+    kopf = _kopf(ui, k, etikett, _kurzstand(ui, k, not_aus), offen=offen)
+    return (f'{kopf}{meldung}<div class="meta">{" · ".join(angaben)}</div>{_pruefzeile(ui, k)}{autonom_zeile}{luecke}'
             f'{verweise}{pruef}{was_neu}{_abweichungen(ui, k)}{pruefnotiz}{versand}{entscheiden}{feedback}</details>')
 
 
@@ -966,9 +1068,18 @@ def _verlauf_zeile(ui, v: dict) -> str:
     zusatz = ""
     # `ausgang` sagt die Zentrale (H4). Fehlt es ganz (aeltere Zentrale), gilt wie vor H4 der Status.
     ausgang = v.get("ausgang")
+    # Der Grund gilt vor dem Ausgang: gleich nach dem Abbruch kann der Ausgang noch "offen" lauten.
+    abbruch = v.get("grund") == "anzeige_offline"
+    status = v.get("anzeige_status")
     von_hand = ausgang == "handarbeit" or (
         ausgang in (None, "") and v.get("entscheidung") == "approve" and v.get("status") == "blockiert")
-    if ausgang == "versendet":
+    if abbruch:
+        was = "Abgebrochen – Anzeige offline"
+        if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+            was += f" ({status})"
+        if (url := _anzeige(v.get("anzeige_url"))):
+            zusatz = " · " + _link(e(url), "Anzeige ↗")
+    elif ausgang == "versendet":
         an = _nur_text(v.get("versand_an"))
         was = f"Versendet an {e(an)}" if an else "Versendet"
     elif ausgang == "unklar":
@@ -993,7 +1104,7 @@ def _verlauf_zeile(ui, v: dict) -> str:
     else:
         was = e(ausgang)                       # ein Ausgang, den diese Seite nicht kennt: wie geliefert
     teile = [f"Fassung {nr if nr else '?'}", was]
-    if v.get("von"):
+    if v.get("von") and not abbruch:
         teile.append(f"von {e(v.get('von'))}")
     teile.append(f"vor {e(_vor(v.get('am')))}")
     return (f'<div class="karte"><b>{e(v.get("firma"))} – {e(v.get("rolle"))}</b> '
@@ -1240,7 +1351,14 @@ async def _abschnitt(ui, request=None) -> str:
         not_aus, not_aus_an = await _not_aus_lesen(ui)
         # Auch die Darstellung steht im Schutz: ein kaputter Wert der Zentrale kostet
         # den Abschnitt, nie die ganze Seite.
-        karten = "".join(_karte(ui, k, not_aus_an) for k in offen)
+        # `bw_karte` klappt genau die Karte auf, die Felix eben bearbeitet hat, und wiederholt die Meldung darin.
+        gewaehlt = request.query_params.get("bw_karte", "") if request is not None else ""
+        if not _KARTE.fullmatch(gewaehlt):
+            gewaehlt = ""
+        karten = "".join(
+            _karte(ui, k, not_aus_an, offen=(an := bool(gewaehlt) and k.get("application_id") == gewaehlt),
+                   meldung=hinweis if an else "")
+            for k in offen)
         portal_kopf = _portal_kopf(ui, offen)
         zeilen = "".join(_verlauf_zeile(ui, v) for v in verlauf[:VERLAUF_MAX])
     except bewerbung_pult.PultFehler as f:
@@ -1266,10 +1384,15 @@ async def _abschnitt(ui, request=None) -> str:
 def routen(ui) -> list:
     e = ui._e
 
-    def ziel(hinweis: str, grund: str = "") -> RedirectResponse:
+    def ziel(hinweis: str, grund: str = "", karte: str | None = None) -> RedirectResponse:
+        """Zurueck auf /freigaben. Mit passender `karte` oeffnet die Seite genau diese Karte, sonst der Abschnitt."""
         abfrage = {"bw_hinweis": hinweis, **({"bw_grund": grund} if grund else {})}
-        return RedirectResponse(f"/freigaben?{urllib.parse.urlencode(abfrage)}#bewerbungen",
-                                status_code=303)
+        if karte is not None and _KARTE.fullmatch(karte):
+            abfrage["bw_karte"] = karte
+            marke = f"karte-{karte}"
+        else:
+            marke = "bewerbungen"
+        return RedirectResponse(f"/freigaben?{urllib.parse.urlencode(abfrage)}#{marke}", status_code=303)
 
     def verboten():
         return ui._fehlerseite(403, "Nicht für diese Anmeldung",
@@ -1293,7 +1416,7 @@ def routen(ui) -> list:
                                f"laden und nachsehen.")
 
     async def abschicken(pfad: str, daten: dict, zeitlimit: float, was: str, erfolg, gelungen,
-                         beschreibung: str):
+                         beschreibung: str, karte: str | None = None):
         """Eine Aenderung an die Zentrale. `gelungen(antwort)` sagt, ob die Antwort der Erfolg ist, den
         diese Aktion meldet; `erfolg` ist der Hinweis dazu (oder eine Funktion der Antwort, die ihn nennt:
         der Not-Aus kann gelungen sein und trotzdem an bleiben); `beschreibung` steht im Protokoll, wenn der
@@ -1314,13 +1437,13 @@ def routen(ui) -> list:
                 return nicht_verbunden()
             if f.art == "abgelehnt":
                 if f.grund in _ABLEHNUNGEN:
-                    return ziel(f.grund)
-                return ziel("abgelehnt", f.grund if _CODE.fullmatch(f.grund) else "")
+                    return ziel(f.grund, karte=karte)
+                return ziel("abgelehnt", f.grund if _CODE.fullmatch(f.grund) else "", karte)
             return unklar_protokolliert("%s: %r", f.art, f.grund)
         _cache_leeren()
         if not (isinstance(r, dict) and gelungen(r)):
             return unklar_protokolliert("Antwort ohne erwarteten Status")
-        return ziel(erfolg(r) if callable(erfolg) else erfolg)
+        return ziel(erfolg(r) if callable(erfolg) else erfolg, karte=karte)
 
     async def senden(request, aktion: str, daten: dict, zeitlimit: float, was: str, erfolg: str):
         kennung = request.path_params["bid"]
@@ -1328,7 +1451,7 @@ def routen(ui) -> list:
         return await abschicken(
             f"/bewerbungen/{bid}/{aktion}", daten, zeitlimit, was, erfolg,
             lambda r: r.get("status") == _ERFOLG[aktion],
-            f"Bewerbung {kennung!r} Fassung {daten['fassung']}: Ausgang von {aktion}")
+            f"Bewerbung {kennung!r} Fassung {daten['fassung']}: Ausgang von {aktion}", kennung)
 
     async def formular(request):
         """Das Formular samt der Vorpruefung aller Routen: CSRF-Marke und Rolle. -> (Formular, None) oder
@@ -1371,7 +1494,7 @@ def routen(ui) -> list:
             # Eine autonome Bewerbung stoppen: dieselbe Entscheidung wie "Nicht bewerben" in der Zentrale,
             # aber hier ist der Grund Pflicht - ohne ihn geht nichts hin.
             if not grund:
-                return ziel("grund_fehlt")
+                return ziel("grund_fehlt", karte=request.path_params["bid"])
             daten["grund"] = grund
             return await senden(request, "nicht-bewerben", daten, ENTSCHEIDUNG_ZEITLIMIT_S,
                                 "die Bewerbung gestoppt wurde", "gestoppt")
@@ -1449,7 +1572,7 @@ def routen(ui) -> list:
         if len(text) > TEXT_MAX:
             return ungueltig(f"Das Anschreiben hat mehr als {TEXT_MAX} Zeichen.")
         if not kommentar and not text:
-            return ziel("kein_feedback")
+            return ziel("kein_feedback", karte=request.path_params["bid"])
         daten = {"fassung": fassung, "von": _von(ui._ui_akteur(request))}
         if kommentar:
             daten["kommentar"] = kommentar
@@ -1504,18 +1627,18 @@ def routen(ui) -> list:
             gesehen.add(frage_id)
             eintraege.append({"frage_id": frage_id, "antwort": text})
         if not eintraege:
-            return ziel("keine_antwort")
+            return ziel("keine_antwort", karte=request.path_params["bid"])
         if len(eintraege) > MAX_ANTWORTEN:
             return ungueltig(f"Mehr als {MAX_ANTWORTEN} Antworten auf einmal.")
         if any(len(x["antwort"]) > ANTWORT_MAX or "\n" in x["antwort"] for x in eintraege):
-            return ziel("antwort_ungueltig")
+            return ziel("antwort_ungueltig", karte=request.path_params["bid"])
         kennung = request.path_params["bid"]
         daten = {"fassung": fassung, "antworten": eintraege, "von": _von(ui._ui_akteur(request))}
         return await abschicken(
             f"/bewerbungen/{urllib.parse.quote(kennung, safe='')}/antworten", daten, ANTWORTEN_ZEITLIMIT_S,
             "die Antworten erfasst wurden", "antworten_erfasst",
             lambda r: r.get("status") == _ERFOLG["antworten"],
-            f"Bewerbung {kennung!r} Fassung {fassung}: Ausgang von antworten")
+            f"Bewerbung {kennung!r} Fassung {fassung}: Ausgang von antworten", kennung)
 
     @ui._gesichert_seite
     async def lauf_starten(request):
@@ -1606,11 +1729,11 @@ def routen(ui) -> list:
                 gesehen.add(frage_id)
                 eintraege.append({"frage_id": frage_id, "antwort": text})
             if not eintraege:
-                return ziel("keine_antwort")
+                return ziel("keine_antwort", karte=request.path_params["bid"])
             if len(eintraege) > PORTAL_MAX_ANTWORTEN:
                 return ungueltig(f"Mehr als {PORTAL_MAX_ANTWORTEN} Antworten auf einmal.")
             if any(len(x["antwort"]) > ANTWORT_MAX or "\n" in x["antwort"] for x in eintraege):
-                return ziel("antwort_ungueltig")
+                return ziel("antwort_ungueltig", karte=request.path_params["bid"])
             daten["antworten"] = eintraege
         elif aktion == "ausgang":
             ausgang = form.get("ausgang")
@@ -1645,7 +1768,7 @@ def routen(ui) -> list:
             f"/bewerbungen/{urllib.parse.quote(kennung, safe='')}/portal/{aktion}", daten,
             PORTAL_ZEITLIMITS[aktion], "es verbucht wurde", erfolg,
             lambda r: r.get("status") in ((status,) if isinstance(status, str) else status),
-            f"Bewerbung {kennung!r} Lauf {lauf_id!r}: Ausgang von portal/{aktion}")
+            f"Bewerbung {kennung!r} Lauf {lauf_id!r}: Ausgang von portal/{aktion}", kennung)
 
     async def portal_datei(request, name: str):
         """Die Unterlagen eines Portal-Laufs, als Rohbytes durchgereicht (nichts wird verarbeitet)."""

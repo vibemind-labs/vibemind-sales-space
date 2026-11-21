@@ -2046,6 +2046,17 @@ details.karte[open] > summary { margin-bottom: .6rem;
                                 border-bottom: 1px solid var(--linie);
                                 padding-bottom: .5rem; }
 details.karte > summary .meta { font-weight: 400; }
+/* Bewerbungen als Übersicht (21.11.2026): eine Zeile je Karte, gekürzt statt umgebrochen. */
+#bewerbungen details.karte { padding: .3rem .8rem; margin: .35rem 0; }
+#bewerbungen details.karte > summary { flex-wrap: nowrap; min-width: 0; }
+#bewerbungen details.karte > summary .badge { flex: none; }
+#bewerbungen details.karte > summary .titel { flex: 1 1 auto; min-width: 0; overflow: hidden;
+                                              text-overflow: ellipsis; white-space: nowrap; }
+#bewerbungen details.karte > summary .stand { flex: 0 1 auto; max-width: 45%; overflow: hidden;
+                                              text-overflow: ellipsis; white-space: nowrap;
+                                              font-weight: 400; font-size: .85rem;
+                                              color: var(--gedaempft); }
+#bewerbungen details.karte > summary .stand.warn { color: var(--fehler_schrift); font-weight: 600; }
 /* Das Bearbeitungsfeld liegt hinter einer zweiten Klappe, damit es die
    Entscheidungsknöpfe nicht verdrängt: wer nur freigeben will, soll
    nicht an einem Textfeld vorbeiscrollen müssen. */
