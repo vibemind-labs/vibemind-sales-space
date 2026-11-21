@@ -47,11 +47,14 @@ create table if not exists :"schema".freigabe_eintraege (
 alter table :"schema".freigabe_eintraege
   drop constraint if exists freigabe_eintraege_herkunft_check,
   add constraint freigabe_eintraege_herkunft_check check (herkunft in
-    ('debugger-claw','selbstbild','werkstatt','sales','marketing','marketing-video'));
+    ('debugger-claw','selbstbild','werkstatt','sales','marketing','marketing-video','post'));
 alter table :"schema".freigabe_eintraege
   drop constraint if exists freigabe_eintraege_art_check,
   add constraint freigabe_eintraege_art_check check (art in
-    ('debugger_pr','selbstbild_rueckfrage','kursfreigabe','entwurf','marketing_video'));
+    ('debugger_pr','selbstbild_rueckfrage','kursfreigabe','entwurf','marketing_video','post_anweisung'));
+
+-- Post-Assistent 3a (21.11.2026): neue Herkunft post, neue Art post_anweisung (Mail mit
+-- vermuteter Anweisung wartet auf Freigabe). Die CHECKs oben sind schon um beide Werte erweitert.
 
 create unique index if not exists freigabe_eintraege_offen_je_quelle
   on :"schema".freigabe_eintraege (herkunft, quelle_ref) where status = 'offen';

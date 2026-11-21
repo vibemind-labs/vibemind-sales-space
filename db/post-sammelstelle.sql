@@ -349,3 +349,33 @@ alter table :"schema".post_mails
   add column if not exists abgleich_aus boolean not null default false;
 create index if not exists post_mails_offen_idx
   on :"schema".post_mails (besitzer, ziel) where erledigt_am is null;
+
+-- ---------------------------------------------------------------------------
+-- Post-Assistent 3a (21.11.2026): Pruefung auf Anweisungen und Dringlichkeit.
+-- `enthaelt_anweisung` null = nicht geprueft. Alles idempotent.
+-- ---------------------------------------------------------------------------
+alter table :"schema".post_mails
+  add column if not exists enthaelt_anweisung boolean,
+  add column if not exists dringlichkeit text,
+  add column if not exists geprueft_am timestamptz,
+  add column if not exists pruef_aufrufe integer not null default 0,
+  add column if not exists pruef_versuche integer not null default 0,
+  add column if not exists anweisung_entscheid text,
+  add column if not exists anweisung_entschieden_am timestamptz;
+
+-- Die CHECKs werden je Lauf durch dieselben ersetzt (kein Wirkungsunterschied).
+do $$
+declare
+  s text := current_setting('post.schema');
+begin
+  execute format('alter table %I.post_mails drop constraint if exists '
+                 'post_mails_dringlichkeit_check', s);
+  execute format('alter table %I.post_mails add constraint '
+                 'post_mails_dringlichkeit_check check (dringlichkeit in '
+                 '(''sofort'',''heute'',''kann_warten'',''nichts''))', s);
+  execute format('alter table %I.post_mails drop constraint if exists '
+                 'post_mails_anweisung_entscheid_check', s);
+  execute format('alter table %I.post_mails add constraint '
+                 'post_mails_anweisung_entscheid_check check '
+                 '(anweisung_entscheid in (''freigegeben'',''gesperrt''))', s);
+end $$;
