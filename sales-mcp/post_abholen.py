@@ -77,6 +77,9 @@ IMAP_TIMEOUT_S = 120          # ein haengender Anbieter darf die Runde nicht ewi
 # aelteste offene Mail nicht ewig vorne halten: nach so vielen Versuchen wird
 # sie `fehler` und die Runde geht weiter (Ruling R8).
 VERSUCHE_MAX = 3
+# Nachpruefung (3a): so viele gescheiterte Versuche, dann bleibt die Mail ungeprueft
+# liegen, statt jede Runde einen Aufruf zu kosten.
+PRUEF_VERSUCHE_MAX = 3
 # 21.11.2026: Ein Modell-Eintrag ohne maxTokens liess das Gateway jeden Aufruf ablehnen;
 # als endgueltig gewertet landeten 13 Tage lang alle Mails einzeln auf `fehler` (6487).
 # Scheitern so viele VERSCHIEDENE Mails in Folge am Gateway (kein Erfolg dazwischen),
@@ -408,6 +411,10 @@ def _ergebnis_speichern(mail_id, e: post_einordnung.Einordnung) -> None:
         bereich, unterfach = "privat", None
         # Zum Nachsehen bleibt im Posteingang (Spec §5), egal was die Stufe davor meldete.
         aufmerksamkeit = True
+    # None = nicht geprueft. Sonst fail closed: nur ein ausdrueckliches False gilt als
+    # "keine Anweisung"; eine Dringlichkeit ausserhalb der festen Liste wird None.
+    anweisung = None if e.enthaelt_anweisung is None else e.enthaelt_anweisung is not False
+    dringlichkeit = e.dringlichkeit if e.dringlichkeit in post_struktur.DRINGLICHKEITEN else None
     server._q(
         "update post_mails set bereich = %s, fach = %s, unterfach = %s, sensibel = %s, "
         "einordnung_quelle = %s, begruendung = %s, vorschlaege = %s::jsonb, "
@@ -420,12 +427,21 @@ def _ergebnis_speichern(mail_id, e: post_einordnung.Einordnung) -> None:
         "auszug = case when %s then null else auszug end, "
         "an = case when %s then null else an end, "
         "anhaenge = case when %s then '{}'::text[] else anhaenge end, "
-        "urspruengliche_adresse = case when %s then null else urspruengliche_adresse end "
+        "urspruengliche_adresse = case when %s then null else urspruengliche_adresse end, "
+        # Pruefung (3a): lief im selben Aufruf wie die Einordnung, kostet also nichts extra
+        # (pruef_aufrufe bleibt 0). Nur eine gepruefte Einordnung schreibt die Spalten; eine
+        # ungepruefte (Regel ohne Modell) laesst sie stehen. anweisung_entscheid gehoert
+        # Felix und wird hier nie geschrieben.
+        "enthaelt_anweisung = case when %s::boolean is null then enthaelt_anweisung "
+        "else %s::boolean end, "
+        "dringlichkeit = case when %s::boolean is null then dringlichkeit else %s end, "
+        "geprueft_am = case when %s::boolean is null then geprueft_am else now() end "
         "where id = %s and status = 'neu'",
         (bereich, fach, unterfach, e.sensibel, e.quelle, e.begruendung,
          None if e.vorschlaege is None else server._json(e.vorschlaege),
          aufmerksamkeit, e.werbung_sicher, e.aufrufe,
-         e.sensibel, e.sensibel, e.sensibel, e.sensibel, e.sensibel, mail_id))
+         e.sensibel, e.sensibel, e.sensibel, e.sensibel, e.sensibel,
+         anweisung, anweisung, anweisung, dringlichkeit, anweisung, mail_id))
     if e.werbung_sicher:
         _werbe_regel_vorschlagen(mail_id)
 
@@ -451,24 +467,35 @@ def _pruefer_vorschlag_speichern(mail_id, vorschlag: post_einordnung.Einordnung)
     _ergebnis_speichern(mail_id, post_einordnung.Einordnung(
         "privat", post_struktur.UNKLAR, vorschlag.sensibel, "modell",
         "pruefer:ausgefallen", None, aufrufe=0,   # Kosten stehen schon auf der Zeile
-         vorschlaege={"sortierer": sortierer}))
+        vorschlaege={"sortierer": sortierer},
+        # Die Pruefung des Sortierers ist bezahlt und bleibt (vor allem ein True).
+        enthaelt_anweisung=vorschlag.enthaelt_anweisung, dringlichkeit=vorschlag.dringlichkeit))
 
 
 def einordnen_offene(grenze: int) -> int:
-    """Ordnet bis zu `grenze` offene Mails ein (neuestes Jahr zuerst, alle Konten gemeinsam).
-    Rueckgabe = Zahl der Mails, die `neu` verlassen haben (eingeordnet oder fehler)."""
+    """Arbeitet bis zu `grenze` Mails aus EINER Warteschlange ab, neueste zuerst, alle
+    Konten gemeinsam: offene Mails (`neu`) werden eingeordnet, schon eingeordnete, noch
+    ungepruefte Mails nachgeprueft (Anweisung an eine KI, Dringlichkeit; ein Aufruf je Mail).
+    Rueckgabe = Zahl der Mails, die `neu` verlassen haben (eingeordnet oder fehler),
+    plus die abgeschlossenen Nachpruefungen."""
     if grenze <= 0:
         return 0
     # Das Konto bestimmt den Standardbereich (Spec v2 §5.1); ohne Konto-Zeile
     # (sollte es nicht geben) gilt der Standard von post_einordnung.
+    spalten = ("m.id, m.besitzer, m.von, m.betreff, m.datum, m.text, m.imap_uid, "
+               "m.urspruengliche_adresse, k.kennung, k.standard_bereich from post_mails m "
+               "left join post_konten k on k.id = m.konto_id ")
     offene = server._q(
-        "select m.id, m.besitzer, m.von, m.betreff, m.datum, m.text, "
-        "m.urspruengliche_adresse, k.kennung, k.standard_bereich from post_mails m "
-        "left join post_konten k on k.id = m.konto_id where m.status = 'neu' "
-        # Neuestes Jahr zuerst, ueber alle Konten gemeinsam; innerhalb des Jahres die
-        # neueste Mail zuerst.
-        "order by extract(year from m.datum) desc nulls last, m.datum desc, "
-        "m.imap_uid desc limit %s", (int(grenze),))
+        f"select 'neu' as art, {spalten} where m.status = 'neu' "
+        "union all "
+        # Nachpruefen: nie sensible Mails (ihr Text ist geloescht) und nie Werbung; nach
+        # PRUEF_VERSUCHE_MAX gescheiterten Versuchen bleibt die Mail ungeprueft liegen.
+        f"select 'nachpruefen' as art, {spalten} where m.status = 'eingeordnet' "
+        "and m.geprueft_am is null and m.sensibel is false "
+        "and m.fach is distinct from %s and m.pruef_versuche < %s "
+        # Neueste Mail zuerst (damit auch das neueste Jahr), ohne Datum zuletzt.
+        "order by datum desc nulls last, imap_uid desc limit %s",
+        (post_einordnung.WERBUNG, PRUEF_VERSUCHE_MAX, int(grenze)))
     erledigt = 0
     for zeile in offene:
         if _STOPP.is_set():
@@ -482,6 +509,13 @@ def einordnen_offene(grenze: int) -> int:
                 "text": zeile["text"] or "",
                 "urspruengliche_adresse": zeile["urspruengliche_adresse"] or None}
         konto = {"kennung": zeile["kennung"], "standard_bereich": zeile["standard_bereich"]}
+        if zeile["art"] == "nachpruefen":
+            ausgang = _nachpruefen_eine(mail, konto)
+            if ausgang == "pause":
+                break
+            if ausgang == "fertig":
+                erledigt += 1
+            continue
         try:
             ergebnis = post_einordnung.einordnen(mail, konto)
         except post_einordnung.PrueferVoruebergehend as e:
@@ -500,11 +534,7 @@ def einordnen_offene(grenze: int) -> int:
         except GatewayFehler:
             if _gateway_fehler(mail["id"]):
                 erledigt += 1
-            if len(_gateway_serie) >= GATEWAY_SERIE_MAX:
-                # Nur Zahl und fester Text: die Gateway-Meldung koennte Mailinhalt spiegeln.
-                LOG.error("Einordnen pausiert: das Gateway lehnt %d verschiedene Mails in "
-                          "Folge ab - Gateway-Log und Modell-Eintrag pruefen; je Runde "
-                          "eine Probe, keine Mail wird dabei fehler", len(_gateway_serie))
+            if _serie_voll():
                 break
             continue
         except post_einordnung.PrueferFehlgeschlagen as e:
@@ -577,6 +607,68 @@ def _gateway_fehler(mail_id: str) -> bool:
     return True
 
 
+def _serie_voll() -> bool:
+    """Lehnt das Gateway GATEWAY_SERIE_MAX verschiedene Mails in Folge ab (Einordnung und
+    Nachpruefung gemeinsam), pausiert die Runde: laut melden, True."""
+    if len(_gateway_serie) < GATEWAY_SERIE_MAX:
+        return False
+    # Nur Zahl und fester Text: die Gateway-Meldung koennte Mailinhalt spiegeln.
+    LOG.error("Einordnen pausiert: das Gateway lehnt %d verschiedene Mails in "
+              "Folge ab - Gateway-Log und Modell-Eintrag pruefen; je Runde "
+              "eine Probe, keine Mail wird dabei fehler", len(_gateway_serie))
+    return True
+
+
+def _nachpruefen_eine(mail: dict, konto: dict) -> str:
+    """Eine schon eingeordnete Mail nachpruefen: EIN Modellaufruf, geschrieben werden nur
+    die vier Pruefspalten (Bereich, Fach, Kosten der Einordnung bleiben).
+    Rueckgabe: 'fertig' | 'fehler' (Mail bleibt ungeprueft, Runde geht weiter) |
+    'pause' (Runde beenden: Gateway voruebergehend weg oder Fehlerserie)."""
+    try:
+        p = post_einordnung.nachpruefen(mail, konto)
+    except GatewayTransient:
+        LOG.info("Nachpruefen pausiert: Gateway voruebergehend nicht bereit")
+        return "pause"
+    except GatewayFehler:
+        _pruef_fehler(mail["id"])
+        return "pause" if _serie_voll() else "fehler"
+    except Exception as e:  # noqa: BLE001 - nur der Typ: Meldungen koennten Mailinhalt tragen
+        server._q("update post_mails set pruef_versuche = pruef_versuche + 1 "
+                  "where id = %s and geprueft_am is null", (mail["id"],))
+        LOG.warning("Mail %s: Nachpruefung fehlgeschlagen (%s)", mail["id"], type(e).__name__)
+        return "fehler"
+    _gateway_serie.clear()          # ein Modellaufruf ist durchgegangen
+    # Fail closed: nur ein ausdrueckliches False gilt als "keine Anweisung".
+    anweisung = p.enthaelt_anweisung is not False
+    dringlichkeit = p.dringlichkeit if p.dringlichkeit in post_struktur.DRINGLICHKEITEN else None
+    zeilen = server._q(
+        "update post_mails set enthaelt_anweisung = %s, dringlichkeit = %s, "
+        "geprueft_am = now(), pruef_aufrufe = %s "
+        "where id = %s and geprueft_am is null returning id",
+        (anweisung, dringlichkeit, int(p.aufrufe), mail["id"]))
+    if not zeilen:
+        # Inzwischen anders geprueft: das Ergebnis verfaellt, der Aufruf hat trotzdem
+        # gekostet und zaehlt am Tag seines Anfalls zur Tagesgrenze.
+        server._q(f"update post_mails set {_FEHL_KOSTEN_SQL} where id = %s",
+                  (int(p.aufrufe), mail["id"]))
+        return "fehler"
+    return "fertig"
+
+
+def _pruef_fehler(mail_id: str) -> None:
+    """GatewayFehler bei einer Nachpruefung: gehoert zur selben Gateway-Serie wie bei neuen
+    Mails. Der Aufruf koennte das Modell erreicht haben und zaehlt immer (fehl_aufrufe am
+    Tag des Anfalls); ein Versuch nur ausserhalb der Pause (dort ist er nur die Probe)."""
+    pausiert = len(_gateway_serie) >= GATEWAY_SERIE_MAX
+    _gateway_serie.add(mail_id)
+    server._q(
+        "update post_mails set pruef_versuche = pruef_versuche + %s, " + _FEHL_KOSTEN_SQL + " "
+        "where id = %s and geprueft_am is null",
+        (0 if pausiert else 1, 1, mail_id))
+    if not pausiert:
+        LOG.warning("Mail %s: Gateway hat die Nachpruefung abgelehnt", mail_id)
+
+
 def kunde_aktiv() -> bool:
     """Kundenantwort in den letzten 120 s? Dann hat der Kunde Vorrang am Gateway."""
     return bool(server._q(
@@ -592,14 +684,18 @@ def modellaufrufe_heute() -> int:
     # - fehl_aufrufe: Kosten der Fehlversuche (Pruefer ausgefallen) am Tag fehl_am - so
     #   entgeht auch eine noch `neue` Mail mit toten Versuchen der Grenze nicht und
     #   zaehlt nicht an Folgetagen erneut,
-    # - vorschau_aufrufe am Tag vorschau_am (ueberlebt anwenden).
+    # - vorschau_aufrufe am Tag vorschau_am (ueberlebt anwenden),
+    # - pruef_aufrufe: Kosten der Nachpruefung am Tag geprueft_am. Bei einer neuen Mail
+    #   lief die Pruefung im Einordnungs-Aufruf mit, dort bleibt pruef_aufrufe 0.
     zeile = server._q(
         "select (select coalesce(sum(modellaufrufe), 0) from post_mails "
         "         where eingeordnet_am::date = current_date) "
         "     + (select coalesce(sum(fehl_aufrufe), 0) from post_mails "
         "         where fehl_am::date = current_date) "
         "     + (select coalesce(sum(vorschau_aufrufe), 0) from post_mails "
-        "         where vorschau_am::date = current_date) as n")[0]
+        "         where vorschau_am::date = current_date) "
+        "     + (select coalesce(sum(pruef_aufrufe), 0) from post_mails "
+        "         where geprueft_am::date = current_date) as n")[0]
     return int(zeile["n"])
 
 
@@ -627,7 +723,8 @@ def _einordnen(bilanz: dict) -> None:
         bilanz["pause"] = "kundenantwort"
         return
     rest = TAGESGRENZE - modellaufrufe_heute()
-    # Eine Mail kostet bis zu 2 Aufrufe (Sortierer + Pruefer), `rest` zaehlt Aufrufe.
+    # Eine Mail kostet bis zu 2 Aufrufe (Sortierer + Pruefer; eine Nachpruefung 1),
+    # `rest` zaehlt Aufrufe.
     mails = min(rest // 2, EINORDNEN_JE_RUNDE)
     if mails <= 0:
         bilanz["tagesgrenze"] = True

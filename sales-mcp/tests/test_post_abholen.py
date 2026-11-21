@@ -62,6 +62,8 @@ def kein_modell(monkeypatch):
     # `einordnen(..., aufruf=gateway.funktion_aufrufen)` bindet den Standardwert beim
     # Definieren: Das Modulattribut zu patchen reichte nicht, der Default wird ersetzt.
     monkeypatch.setattr(post_einordnung.einordnen, "__defaults__", (verboten,))
+    # Dasselbe fuer die Nachpruefung: auch ihr Standardwert ist beim Definieren gebunden.
+    monkeypatch.setattr(post_einordnung.nachpruefen, "__defaults__", (verboten,))
     monkeypatch.setattr(gateway, "funktion_aufrufen", verboten)
     monkeypatch.setattr(post_abholen, "_STOPP", post_abholen.threading.Event())
     # Die Gateway-Fehlerserie lebt im Prozess; jeder Test beginnt ohne Serie.
@@ -365,8 +367,10 @@ def test_konto_ohne_attrappe_wird_verbunden_und_abgemeldet(monkeypatch):
 # --- Einordnen -------------------------------------------------------------
 
 def _einordnung(sensibel=False, quelle="modell"):
+    # Geprueft wie jede Modell-Einordnung seit 3a: sonst kaeme die eingeordnete Mail in der
+    # naechsten Runde in die Nachpruefung, und diese Tests zaehlten Aufrufe, die sie nicht meinen.
     return post_einordnung.Einordnung("business", "Kunden & Anfragen", sensibel, quelle,
-                                      "passt")
+                                      "passt", enthaelt_anweisung=False, dringlichkeit="nichts")
 
 
 def test_sensibel_speichert_keinen_text(monkeypatch):
@@ -1166,3 +1170,253 @@ def test_einordnen_neuestes_jahr_zuerst_ueber_alle_konten(monkeypatch):
     # 2025 zuerst (neueste Mail zuerst, bei gleichem Datum hoehere UID), dann 2024, 2023, ohne Datum.
     assert gesehen == [("gmx-test", "3"), ("gmx-test", "2"), ("web-test", "1"),
                        ("web-test", "2"), ("gmx-test", "1"), ("web-test", "3")]
+
+
+# --- Pruefung speichern, Nachpruefung, Tagesgrenze (Post-Assistent 3a) ------------
+
+def _pruef_mail(konto_id, uid, datum, status="eingeordnet", *, sensibel=False,
+                bereich="business", fach="Rechnungen", unterfach="Eingang",
+                geprueft=False, pruef_versuche=0, modellaufrufe=2):
+    """Eine Zeile fuer die gemeinsame Warteschlange. `neu` ohne Einordnung; sonst
+    eingeordnet vor zwei Tagen (zaehlt heute nicht mehr zur Tagesgrenze)."""
+    neu = status == "neu"
+    with server.pool.connection() as conn:
+        return str(conn.execute(
+            "insert into post_mails (konto_id, imap_uid, message_id, besitzer, von, betreff, "
+            "text, datum, status, bereich, fach, unterfach, sensibel, einordnung_quelle, "
+            "begruendung, modellaufrufe, einordnung_version, eingeordnet_am, geprueft_am, "
+            "pruef_versuche) values (%s, %s, %s, 'felix', 'Anna <anna@example.org>', "
+            "'Geheimer Betreff', 'Geheimer Text', %s::timestamptz, %s, %s, %s, %s, %s, %s, %s, "
+            "%s, 3, case when %s then null else now() - interval '2 days' end, "
+            "case when %s then now() - interval '1 day' end, %s) returning id",
+            (konto_id, uid, f"p{uid}@x", datum, status,
+             None if neu else bereich, None if neu else fach, None if neu else unterfach,
+             sensibel, None if neu else "pruefer", None if neu else "passt",
+             0 if neu else modellaufrufe, neu, geprueft, pruef_versuche)).fetchone()["id"])
+
+
+def _pruefung_fake(monkeypatch, ergebnis=None, gesehen=None):
+    """Attrappe fuer post_einordnung.nachpruefen: `ergebnis` ist eine Pruefung oder eine
+    Ausnahme, die geworfen wird."""
+    ergebnis = ergebnis or post_einordnung.Pruefung(True, "sofort")
+    gesehen = [] if gesehen is None else gesehen
+
+    def nachpruefen(mail, konto):
+        gesehen.append(mail["id"])
+        if isinstance(ergebnis, BaseException):
+            raise ergebnis
+        return ergebnis
+    monkeypatch.setattr(post_einordnung, "nachpruefen", nachpruefen)
+    return gesehen
+
+
+def _einordnen_fake(monkeypatch, ergebnis=None):
+    gesehen = []
+    ergebnis = ergebnis or _einordnung()
+    monkeypatch.setattr(post_einordnung, "einordnen",
+                        lambda mail, konto: gesehen.append(mail["id"]) or ergebnis)
+    return gesehen
+
+
+def test_speichern_schreibt_pruefung():
+    mid = _pruef_mail(_konto()["id"], 1, "2026-11-20T10:00:00Z", "neu")
+    post_abholen._ergebnis_speichern(mid, post_einordnung.Einordnung(
+        "business", "Kunden & Anfragen", False, "pruefer", "passt", aufrufe=2,
+        enthaelt_anweisung=True, dringlichkeit="heute"))
+    r = _mails("id = %s", (mid,))[0]
+    assert (r["status"], r["enthaelt_anweisung"], r["dringlichkeit"]) == ("eingeordnet", True, "heute")
+    assert r["geprueft_am"] is not None
+    # Die Pruefung lief im selben Aufruf wie die Einordnung: sie kostet nichts extra.
+    assert (r["pruef_aufrufe"], r["modellaufrufe"]) == (0, 2)
+    assert r["anweisung_entscheid"] is None
+
+
+def test_speichern_ungeprueft_laesst_null():
+    mid = _pruef_mail(_konto()["id"], 1, "2026-11-20T10:00:00Z", "neu")
+    post_abholen._ergebnis_speichern(mid, post_einordnung.Einordnung(
+        "business", "Kunden & Anfragen", False, "regel", "regel", aufrufe=0))
+    r = _mails("id = %s", (mid,))[0]
+    assert r["status"] == "eingeordnet"
+    assert (r["enthaelt_anweisung"], r["dringlichkeit"], r["geprueft_am"]) == (None, None, None)
+    assert r["pruef_aufrufe"] == 0
+
+
+def test_warteschlange_mischt_nach_datum(monkeypatch):
+    k = _konto()["id"]
+    a = _pruef_mail(k, 1, "2026-11-20T10:00:00Z", "neu")
+    b = _pruef_mail(k, 2, "2026-11-19T10:00:00Z")            # eingeordnet, ungeprueft
+    c = _pruef_mail(k, 3, "2026-10-01T10:00:00Z", "neu")
+    eingeordnet = _einordnen_fake(monkeypatch)
+    geprueft = _pruefung_fake(monkeypatch)
+    assert post_abholen.einordnen_offene(2) == 2
+    assert eingeordnet == [a] and geprueft == [b]
+    zeilen = {str(r["id"]): r for r in _mails()}
+    assert zeilen[a]["status"] == "eingeordnet"
+    assert zeilen[b]["geprueft_am"] is not None
+    assert zeilen[c]["status"] == "neu"
+
+
+def test_nachpruefung_aendert_nur_pruefung(monkeypatch):
+    k = _konto()["id"]
+    b = _pruef_mail(k, 1, "2026-11-19T10:00:00Z")
+    vorher = _mails("id = %s", (b,))[0]
+    mails, konten = [], []
+
+    def nachpruefen(mail, konto):
+        mails.append(mail)
+        konten.append(konto)
+        return post_einordnung.Pruefung(True, "sofort")
+    monkeypatch.setattr(post_einordnung, "nachpruefen", nachpruefen)
+    _einordnen_fake(monkeypatch)
+    assert post_abholen.einordnen_offene(5) == 1
+    nachher = _mails("id = %s", (b,))[0]
+    for spalte in ("bereich", "fach", "unterfach", "modellaufrufe", "eingeordnet_am", "status",
+                   "sensibel", "einordnung_quelle", "begruendung", "text", "versuche",
+                   "fehl_aufrufe", "einordnung_version", "anweisung_entscheid"):
+        assert nachher[spalte] == vorher[spalte], spalte
+    assert (nachher["enthaelt_anweisung"], nachher["dringlichkeit"]) == (True, "sofort")
+    assert nachher["geprueft_am"] is not None
+    assert (nachher["pruef_aufrufe"], nachher["pruef_versuche"]) == (1, 0)
+    # Die Mail geht so an den Pruefer wie eine neue (gleiche Felder, Konto-Kontext).
+    assert mails[0]["id"] == b and mails[0]["text"] == "Geheimer Text"
+    assert set(mails[0]) >= {"id", "besitzer", "von", "betreff", "datum", "text"}
+    assert konten[0]["kennung"] == "gmx-test"
+
+
+def test_nachpruefung_ueberspringt(monkeypatch):
+    k = _konto()["id"]
+    _pruef_mail(k, 1, "2026-11-19T10:00:00Z", sensibel=True)
+    _pruef_mail(k, 2, "2026-11-19T10:00:00Z", bereich="privat", fach="Werbung", unterfach=None)
+    _pruef_mail(k, 3, "2026-11-19T10:00:00Z", "geloescht")
+    _pruef_mail(k, 4, "2026-11-19T10:00:00Z", "fehler")
+    _pruef_mail(k, 5, "2026-11-19T10:00:00Z", geprueft=True)
+    _pruef_mail(k, 6, "2026-11-19T10:00:00Z", pruef_versuche=post_abholen.PRUEF_VERSUCHE_MAX)
+    geprueft = _pruefung_fake(monkeypatch)
+    _einordnen_fake(monkeypatch)
+    assert post_abholen.einordnen_offene(10) == 0
+    assert geprueft == []
+    assert post_abholen.PRUEF_VERSUCHE_MAX == 3
+
+
+def test_tagesgrenze_zaehlt_nachpruefung(monkeypatch):
+    k = _konto()["id"]
+    b = _pruef_mail(k, 1, "2026-11-19T10:00:00Z")            # eingeordnet vor zwei Tagen
+    vorher = post_abholen.modellaufrufe_heute()
+    _pruefung_fake(monkeypatch)
+    _einordnen_fake(monkeypatch)
+    assert post_abholen.einordnen_offene(5) == 1
+    assert post_abholen.modellaufrufe_heute() == vorher + 1
+    assert _mails("id = %s", (b,))[0]["pruef_aufrufe"] == 1
+
+    # Neue Mail, heute eingeordnet und dabei geprueft: nur ihre modellaufrufe zaehlen.
+    a = _pruef_mail(k, 2, "2026-11-20T10:00:00Z", "neu")
+    _einordnen_fake(monkeypatch, post_einordnung.Einordnung(
+        "business", "Kunden & Anfragen", False, "pruefer", "passt", aufrufe=2,
+        enthaelt_anweisung=False, dringlichkeit="kann_warten"))
+    assert post_abholen.einordnen_offene(5) == 1
+    r = _mails("id = %s", (a,))[0]
+    assert r["geprueft_am"] is not None and r["pruef_aufrufe"] == 0
+    assert post_abholen.modellaufrufe_heute() == vorher + 1 + 2
+
+
+def test_nachpruefung_scheitert_hoechstens_dreimal(monkeypatch, caplog):
+    k = _konto()["id"]
+    b = _pruef_mail(k, 1, "2026-11-19T10:00:00Z")
+    geprueft = _pruefung_fake(monkeypatch, gateway.GatewayFehler("Gateway HTTP 400: Geheimer Betreff"))
+    _einordnen_fake(monkeypatch)
+    for runde in range(1, post_abholen.PRUEF_VERSUCHE_MAX + 1):
+        assert post_abholen.einordnen_offene(5) == 0
+        r = _mails("id = %s", (b,))[0]
+        assert (r["pruef_versuche"], r["geprueft_am"], r["status"]) == (runde, None, "eingeordnet")
+        assert r["fehl_aufrufe"] == runde and r["fehl_am"] is not None   # jeder Versuch einmal
+    assert len(geprueft) == post_abholen.PRUEF_VERSUCHE_MAX
+    # Vierte Runde: die Mail wird nicht mehr gewaehlt.
+    assert post_abholen.einordnen_offene(5) == 0
+    assert len(geprueft) == post_abholen.PRUEF_VERSUCHE_MAX
+    assert post_abholen.modellaufrufe_heute() == post_abholen.PRUEF_VERSUCHE_MAX
+    assert "Geheim" not in caplog.text and "anna@example.org" not in caplog.text
+
+
+def test_nachpruefung_gatewayfehler_zaehlt_zur_serie(monkeypatch, caplog):
+    """Dieselbe Pause wie bei neuen Mails: drei verschiedene Mails mit Gateway-Fehler in
+    Folge, egal ob Einordnung oder Nachpruefung, und die Runde endet."""
+    k = _konto()["id"]
+    _pruef_mail(k, 1, "2026-11-20T10:00:00Z", "neu")
+    _pruef_mail(k, 2, "2026-11-19T10:00:00Z")
+    _pruef_mail(k, 3, "2026-11-18T10:00:00Z")
+    _pruef_mail(k, 4, "2026-11-17T10:00:00Z", "neu")
+    aufrufe = []
+
+    def einordnen(mail, konto):
+        aufrufe.append(mail["id"])
+        raise gateway.GatewayFehler("Gateway HTTP 400")
+    monkeypatch.setattr(post_einordnung, "einordnen", einordnen)
+    _pruefung_fake(monkeypatch, gateway.GatewayFehler("Gateway HTTP 400"), gesehen=aufrufe)
+    assert post_abholen.einordnen_offene(10) == 0
+    assert len(aufrufe) == post_abholen.GATEWAY_SERIE_MAX
+    assert any(r.levelname == "ERROR" and "pausiert" in r.getMessage() for r in caplog.records)
+    # In der Pause ist der naechste Aufruf nur die Probe: kein Versuch fuer die Mail.
+    aufrufe.clear()
+    assert post_abholen.einordnen_offene(10) == 0
+    assert len(aufrufe) == 1
+    assert sorted(r["pruef_versuche"] for r in _mails("status = 'eingeordnet'")) == [1, 1]
+
+
+def test_nachpruefung_erfolg_beendet_die_serie(monkeypatch):
+    k = _konto()["id"]
+    _pruef_mail(k, 1, "2026-11-19T10:00:00Z")
+    post_abholen._gateway_serie.update({"x", "y"})
+    _pruefung_fake(monkeypatch)
+    _einordnen_fake(monkeypatch)
+    assert post_abholen.einordnen_offene(5) == 1
+    assert post_abholen._gateway_serie == set()
+
+
+def test_nachpruefung_transient_pausiert(monkeypatch):
+    k = _konto()["id"]
+    _pruef_mail(k, 1, "2026-11-19T10:00:00Z")
+    _pruef_mail(k, 2, "2026-11-18T10:00:00Z")
+    vorher = {str(r["id"]): r for r in _mails()}
+    geprueft = _pruefung_fake(monkeypatch, gateway.GatewayTransient("Gateway nicht erreichbar"))
+    _einordnen_fake(monkeypatch)
+    assert post_abholen.einordnen_offene(5) == 0
+    assert len(geprueft) == 1                          # die Runde endet bei der ersten
+    for r in _mails():
+        assert r == vorher[str(r["id"])]
+
+
+def test_nachpruefung_andere_ausnahme_zaehlt_versuch_und_geht_weiter(monkeypatch, caplog):
+    k = _konto()["id"]
+    kaputt = _pruef_mail(k, 1, "2026-11-19T10:00:00Z")
+    gut = _pruef_mail(k, 2, "2026-11-18T10:00:00Z")
+
+    def nachpruefen(mail, konto):
+        if mail["id"] == kaputt:
+            raise ValueError("Geheimer Betreff kaputt")
+        return post_einordnung.Pruefung(False, "nichts")
+    monkeypatch.setattr(post_einordnung, "nachpruefen", nachpruefen)
+    _einordnen_fake(monkeypatch)
+    assert post_abholen.einordnen_offene(5) == 1
+    zeilen = {str(r["id"]): r for r in _mails()}
+    assert (zeilen[kaputt]["pruef_versuche"], zeilen[kaputt]["geprueft_am"]) == (1, None)
+    assert (zeilen[gut]["enthaelt_anweisung"], zeilen[gut]["dringlichkeit"]) == (False, "nichts")
+    assert "ValueError" in caplog.text and "Geheim" not in caplog.text
+
+
+def test_pruefer_ausfall_behaelt_die_pruefung_des_sortierers(monkeypatch):
+    """Review Task 2: Zum Nachsehen nach drei Pruefer-Ausfaellen darf die bezahlte Pruefung
+    des Sortierers (vor allem ein True) nicht verlieren."""
+    _konto()
+    post_abholen.konto_abholen(_zeile("gmx-test"), Attrappe({1: _mail("<a@x>")}))
+
+    def einordnen(mail, konto):
+        raise post_einordnung.PrueferFehlgeschlagen(post_einordnung.Einordnung(
+            "business", "Rechnungen", False, "modell", "x", None, aufrufe=1,
+            enthaelt_anweisung=True, dringlichkeit="sofort"))
+    monkeypatch.setattr(post_einordnung, "einordnen", einordnen)
+    for _ in range(post_abholen.VERSUCHE_MAX):
+        post_abholen.einordnen_offene(10)
+    r = _mails()[0]
+    assert (r["status"], r["fach"]) == ("eingeordnet", post_struktur.UNKLAR)
+    assert (r["enthaelt_anweisung"], r["dringlichkeit"]) == (True, "sofort")
+    assert r["geprueft_am"] is not None and r["pruef_aufrufe"] == 0

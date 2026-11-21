@@ -272,3 +272,57 @@ def test_absender_ohne_adresse_korrektur_gelingt_mit_standardformular():
                  {"bereich": "business", "fach": "Rechnungen",
                   "regel": "ja"}).status_code == 400
     assert _zeile(m3)["fach"] == ps.UNKLAR
+
+
+PRUEFSPALTEN = ("enthaelt_anweisung", "dringlichkeit", "geprueft_am", "pruef_aufrufe",
+                "pruef_versuche", "anweisung_entscheid", "anweisung_entschieden_am")
+
+
+def _markiert(mail_id):
+    """Geprueft, mit Anweisung an eine KI, und Felix hat die Mail fuer den Agenten gesperrt."""
+    with server.pool.connection() as conn:
+        conn.execute("update post_mails set enthaelt_anweisung = true, dringlichkeit = 'heute', "
+                     "geprueft_am = now() - interval '1 day', pruef_aufrufe = 1, "
+                     "anweisung_entscheid = 'gesperrt', anweisung_entschieden_am = now() "
+                     "where id = %s", (mail_id,))
+    z = _zeile(mail_id)
+    return {s: z[s] for s in PRUEFSPALTEN}
+
+
+def test_korrektur_und_neu_einordnen_lassen_pruefung_stehen():
+    """Post-Assistent 3a, Review Focus 2: eine menschliche Korrektur (Formular und
+    Vorschlag) und die Neu-Sortierung (anwenden) ordnen neu ein, die Pruefung und
+    Felix' Sperre bleiben stehen."""
+    import post_neu_einordnen
+    # Korrektur ueber das Formular.
+    m = _mail("t8_anna", "business", "Kunden & Anfragen", von="X <x@absender.de>")
+    vorher = _markiert(m)
+    assert _post("t8_anna", f"/post/mail/{m}/korrigieren",
+                 {"bereich": "business", "fach": "Rechnungen", "sensibel": "ja"}).status_code == 303
+    z = _zeile(m)
+    assert (z["fach"], z["einordnung_quelle"], z["sensibel"]) == ("Rechnungen", "mensch", True)
+    assert {s: z[s] for s in PRUEFSPALTEN} == vorher
+
+    # Vorschlag uebernehmen (derselbe Speicherweg, eigener Einstieg).
+    v = _unklar()
+    vorher = _markiert(v)
+    assert _post("t8_anna", f"/post/mail/{v}/vorschlag", {"wahl": "pruefer"}).status_code == 303
+    z = _zeile(v)
+    assert (z["fach"], z["einordnung_quelle"]) == ("Rechnungen", "mensch")
+    assert {s: z[s] for s in PRUEFSPALTEN} == vorher
+
+    # Neu-Sortierung: anwenden uebernimmt eine Vorschau in die echten Spalten.
+    n = _mail("t8_anna", "business", "Sonstiges", von="Y <y@absender.de>")
+    with server.pool.connection() as conn:
+        conn.execute("update post_mails set einordnung_version = 1, vorschau = %s::jsonb "
+                     "where id = %s",
+                     (json.dumps({"bereich": "privat", "fach": "Rechnungen", "unterfach": None,
+                                  "sensibel": False, "quelle": "pruefer", "begruendung": "neu",
+                                  "vorschlaege": None, "aufrufe": 2, "aufmerksamkeit": False,
+                                  "werbung_sicher": False}), n))
+    vorher = _markiert(n)
+    assert post_neu_einordnen.anwenden() == 1
+    z = _zeile(n)
+    assert (z["bereich"], z["fach"], z["einordnung_version"], z["vorschau"]) == \
+        ("privat", "Rechnungen", 3, None)
+    assert {s: z[s] for s in PRUEFSPALTEN} == vorher

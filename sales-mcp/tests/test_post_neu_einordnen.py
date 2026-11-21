@@ -222,6 +222,16 @@ def test_pruefer_ausfall_wird_zum_nachsehen(monkeypatch, konto_id):
     assert v["vorschlaege"]["sortierer"]["begruendung"] == "sortierer-grund"
 
 
+def test_pruefer_ausfall_behaelt_die_pruefung_des_sortierers():
+    """Review Task 2: die bezahlte Pruefung des Sortierers (vor allem ein True) geht beim
+    Pruefer-Ausfall nicht verloren."""
+    e = neu._pruefer_ausfall(post_einordnung.Einordnung(
+        "business", "Sonstiges", False, "modell", "x", None, aufrufe=1,
+        enthaelt_anweisung=True, dringlichkeit="sofort"))
+    assert (e.fach, e.aufrufe) == (post_struktur.UNKLAR, 2)
+    assert (e.enthaelt_anweisung, e.dringlichkeit) == (True, "sofort")
+
+
 def test_bericht_enthaelt_keine_betreffs(monkeypatch, konto_id):
     _mail(konto_id, 1, betreff="GEHEIM-123", von="Max Muster <max@mystery-test.example>")
     _mail(konto_id, 2, betreff="GEHEIM-456", von="x@instagram.com")

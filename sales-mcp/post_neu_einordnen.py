@@ -95,7 +95,9 @@ def _pruefer_ausfall(vorschlag: post_einordnung.Einordnung) -> post_einordnung.E
     return post_einordnung.Einordnung(
         "privat", post_struktur.UNKLAR, vorschlag.sensibel, "modell",
         "pruefer:ausgefallen", None, aufrufe=vorschlag.aufrufe + 1,
-        vorschlaege={"sortierer": sortierer})
+        vorschlaege={"sortierer": sortierer},
+        # Die Pruefung des Sortierers ist bezahlt und bleibt (vor allem ein True).
+        enthaelt_anweisung=vorschlag.enthaelt_anweisung, dringlichkeit=vorschlag.dringlichkeit)
 
 
 # Kosten der Vorschau fuer die Tagesgrenze: `vorschau_aufrufe` ueberlebt `anwenden` (das

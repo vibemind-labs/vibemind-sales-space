@@ -444,9 +444,15 @@ def test_regel_gilt_nicht_fuer_fremde_konten(monkeypatch):
     # Nutzerregel zuerst (ohne Modell, `nach_regel`), sonst die Modell-Attrappe.
     monkeypatch.setattr(pe, "einordnen", lambda mail, konto: pe.nach_regel(mail, konto)
                         or pe.Einordnung("business", ps.UNKLAR, False, "modell", "attrappe"))
+    # Die korrigierte Mail ist eingeordnet und noch ungeprueft: sie kommt in die
+    # Nachpruefung (Post-Assistent 3a). Nie das echte Modell - eine Attrappe.
+    geprueft = []
+    monkeypatch.setattr(pe, "nachpruefen", lambda mail, konto: geprueft.append(mail["id"])
+                        or pe.Pruefung(False, None))
     annas = _mail("t8_anna", None, None, status="neu", von="X <x@absender.de>")
     bens = _mail("t8_ben", None, None, status="neu", von="X <x@absender.de>")
-    assert post_abholen.einordnen_offene(10) == 2
+    assert post_abholen.einordnen_offene(10) == 3      # zwei neue + eine Nachpruefung
+    assert geprueft == [m]
     a, b = _zeile(annas), _zeile(bens)
     assert (a["bereich"], a["fach"], a["einordnung_quelle"]) == (
         "privat", "Abos & Newsletter", "regel")
