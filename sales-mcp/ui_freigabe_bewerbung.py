@@ -827,6 +827,73 @@ def _portal_inhalt(ui, k: dict, p: dict, basis: str, nr, lauf_id: str) -> str:
     return '<p class="meta">Stand unbekannt – Seite neu laden.</p>'
 
 
+def _kurzstand(ui, k: dict, not_aus: bool) -> tuple[str, str] | None:
+    """Der kurze Stand in der zugeklappten Zeile einer Unterlagen-Karte: (Klasse, Text), Klasse "" oder "warn".
+    Warnungen gehen vor neutrale Stände; ein unbekannter Autonomie-Stand zeigt nichts (None)."""
+    ue = _ueberarbeitung(k)
+    a = k.get("autonom")
+    stand = a.get("stand") if isinstance(a, dict) else None
+    v = k.get("versand")
+    if ue == "gescheitert":
+        return "warn", "Überarbeitung gescheitert"
+    if ue == "abgelehnt":
+        return "warn", "Feedback nicht umsetzbar"
+    if stand == "empfaenger_pruefen" or (isinstance(v, dict) and _nur_text(v.get("warnung"))):
+        return "warn", "Empfänger prüfen"
+    if stand == "bereit" and not_aus:
+        return "warn", "bereit · Not-Aus hält"
+    if k.get("wartet_auf_durchsicht"):
+        return "", "Wartet auf Durchsicht"
+    if ue in ("wartet", "laeuft") or stand == "feedback_offen":
+        return "", "Feedback läuft"
+    if stand == "bereit":
+        uhr = _in_ortszeit(a.get("faellig_am"), lambda z: _uhrzeit(ui, z))
+        return "", f"bereit · geht {uhr} raus" if uhr else "bereit"
+    if stand == "offene_fragen":
+        return "", "Fragen offen"
+    if not isinstance(a, dict) or stand == "nach_feedback":
+        return "", "Freigabe nötig"
+    return None
+
+
+def _portal_kurzstand(ui, k: dict) -> tuple[str, str] | None:
+    """Der kurze Stand in der zugeklappten Zeile einer Portal-Karte (Klasse, Text); ein unbekannter Zustand: None."""
+    p = k["portal"]
+    zustand = p.get("zustand")
+    if zustand == "offline":
+        return "warn", "Anzeige offline"
+    if zustand == "unklar":
+        return "warn", "Unklar, ob abgeschickt"
+    if zustand == "wartet_auf_worker" and _bot_laeuft_nicht(p):
+        return "warn", _BOT_LAEUFT_NICHT
+    if zustand == "bereit":
+        hindernis = p.get("hindernis") if isinstance(p.get("hindernis"), str) else None
+        if hindernis not in _KEIN_HINDERNIS:
+            return "warn", "bereit · Hindernis"
+        tage = p.get("briefdatum_alter_tage")
+        if isinstance(tage, int) and not isinstance(tage, bool) and tage >= BRIEFDATUM_HINWEIS_AB_TAGE:
+            return "warn", "bereit · Datum prüfen"
+    if zustand == "selbst_bewerben":
+        grund = p.get("grund")
+        klasse = PORTAL_GRUENDE.get(grund if isinstance(grund, str) else "", PORTAL_GRUENDE["unbekannt"])[0]
+        return ("warn" if klasse == "warnung" else ""), "Selbst bewerben"
+    if isinstance(zustand, str) and zustand in PORTAL_ZUSTAENDE:
+        return "", PORTAL_ZUSTAENDE[zustand]
+    return None
+
+
+def _kopf(ui, k: dict, etikett: str, stand: tuple[str, str] | None, *, offen: bool = False) -> str:
+    """Die Kopfzeile einer Karte bis einschliesslich `</summary>`: Etikett, "Firma – Rolle", kurzer Stand.
+    Die Karte ist zugeklappt, `offen` klappt sie auf. Ohne Kennung als Text gibt es kein `id`."""
+    e = ui._e
+    kennung = k.get("application_id")
+    marke = f' id="karte-{e(kennung)}"' if isinstance(kennung, str) else ""
+    titel = f'{e(k.get("firma"))} – {e(k.get("rolle"))}'
+    zeile = f'<span class="stand{" warn" if stand[0] == "warn" else ""}">{e(stand[1])}</span>' if stand else ""
+    return (f'<details class="karte"{marke}{" open" if offen else ""}><summary>{etikett}'
+            f'<b class="titel" title="{titel}">{titel}</b>{zeile}</summary>')
+
+
 # Nur in diesen Zuständen ist sicher, dass noch nichts abgeschickt ist: nur dann nimmt die Portal-Karte Feedback an.
 _PORTAL_FEEDBACK_ZUSTAENDE = ("selbst_bewerben", "bereit", "frage_offen", "wartet_auf_worker", "offline")
 
@@ -851,9 +918,8 @@ def _portal_karte(ui, k: dict) -> str:
         inhalt = '<p class="meta">Lauf unbekannt – Seite neu laden.</p>'
     if p.get("zustand") in _PORTAL_FEEDBACK_ZUSTAENDE and not inhalt.startswith('<p class="meta">Lauf unbekannt'):
         inhalt += _feedback_formular(ui, k, basis, nr, unterlagen=False)
-    return (f'<details class="karte" open><summary><span class="badge">Portal</span>'
-            f'<b>{e(k.get("firma"))} – {e(k.get("rolle"))}</b></summary>'
-            f'<div class="meta">{" · ".join(angaben)}</div>{verweise}{_abweichungen(ui, k)}{inhalt}</details>')
+    kopf = _kopf(ui, k, '<span class="badge">Portal</span>', _portal_kurzstand(ui, k))
+    return (f'{kopf}<div class="meta">{" · ".join(angaben)}</div>{verweise}{_abweichungen(ui, k)}{inhalt}</details>')
 
 
 def _portal_kopf(ui, karten: list[dict]) -> str:
@@ -944,9 +1010,8 @@ def _karte(ui, k: dict, not_aus: bool = False) -> str:
     weg = k.get("versand") if isinstance(k.get("versand"), dict) else {}
     kanal = _nur_text(weg.get("kanal")) or k.get("kanal")
     etikett = f'<span class="badge">{e(_label(KANAELE, kanal))}</span>' if kanal else ""
-    return (f'<details class="karte" open><summary>{etikett}'
-            f'<b>{e(k.get("firma"))} – {e(k.get("rolle"))}</b></summary>'
-            f'<div class="meta">{" · ".join(angaben)}</div>{autonom_zeile}{luecke}'
+    kopf = _kopf(ui, k, etikett, _kurzstand(ui, k, not_aus))
+    return (f'{kopf}<div class="meta">{" · ".join(angaben)}</div>{autonom_zeile}{luecke}'
             f'{verweise}{pruef}{was_neu}{_abweichungen(ui, k)}{pruefnotiz}{versand}{entscheiden}{feedback}</details>')
 
 

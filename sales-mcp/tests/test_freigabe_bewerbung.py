@@ -801,8 +801,8 @@ def test_ohne_kanal_kein_leeres_etikett(client, falsch):                        
     falsch.karten = [karte(kanal=""), karte(application_id=BID2, kanal=None, firma="Zwei")]
     s = _abschnitt(client)
     assert 'class="badge"></span>' not in s
-    assert "<summary><b>Muster GmbH – Data Engineer</b></summary>" in s
-    assert "<summary><b>Zwei – Data Engineer</b></summary>" in s
+    assert '<summary><b class="titel" title="Muster GmbH – Data Engineer">Muster GmbH – Data Engineer</b>' in s
+    assert '<summary><b class="titel" title="Zwei – Data Engineer">Zwei – Data Engineer</b>' in s
 
 
 def test_kaputte_karte_reisst_die_seite_nicht(client, falsch, caplog):             # F5, Review Focus 4
@@ -983,12 +983,12 @@ def test_etikett_folgt_dem_versandweg(client, falsch):
     ]
     s = _abschnitt(client)
     a, b, c, d, f, g = _karten(s)
-    assert '<summary><span class="badge">E-Mail</span><b>A – Data Engineer</b>' in a
-    assert '<summary><span class="badge">Portal</span><b>B – Data Engineer</b>' in b
-    assert '<summary><span class="badge">E-Mail</span><b>C – Data Engineer</b>' in c
-    assert '<summary><span class="badge">Portal</span><b>D – Data Engineer</b>' in d
-    assert '<span class="badge">&lt;script&gt;x&lt;/script&gt;</span><b>E – ' in f
-    assert '<summary><span class="badge">Portal</span><b>F – Data Engineer</b>' in g
+    assert '<summary><span class="badge">E-Mail</span><b class="titel" title="A – Data Engineer">A – Data Engineer</b>' in a
+    assert '<summary><span class="badge">Portal</span><b class="titel" title="B – Data Engineer">B – Data Engineer</b>' in b
+    assert '<summary><span class="badge">E-Mail</span><b class="titel" title="C – Data Engineer">C – Data Engineer</b>' in c
+    assert '<summary><span class="badge">Portal</span><b class="titel" title="D – Data Engineer">D – Data Engineer</b>' in d
+    assert '<span class="badge">&lt;script&gt;x&lt;/script&gt;</span><b class="titel" title="E – ' in f
+    assert '<summary><span class="badge">Portal</span><b class="titel" title="F – Data Engineer">F – Data Engineer</b>' in g
     assert "<script" not in s
 
 
@@ -3709,3 +3709,73 @@ def test_feedback_hinweis_nennt_hermes(client, falsch):
     art, text = ui_freigabe_bewerbung._HINWEISE["feedback"]
     assert art == "hinweis" and "Durchsicht" not in text
     assert text == "Feedback erfasst – Hermes überarbeitet die Fassung, in ein paar Minuten liegt die neue hier."
+
+
+def test_karte_ist_eine_zugeklappte_zeile(client, falsch):
+    s = _abschnitt(client)
+    assert f'<details class="karte" id="karte-{BID}"><summary><span class="badge">E-Mail</span>' in s
+    assert ('<b class="titel" title="Muster GmbH – Data Engineer">Muster GmbH – Data Engineer</b>'
+            '<span class="stand">Freigabe nötig</span></summary>') in s
+    assert 'class="karte" open' not in s and " open><summary>" not in s
+    assert "Kein Spark-Projekt" in s            # der Inhalt ist noch da, nur zugeklappt
+
+
+def test_kennung_im_id_attribut_ist_maskiert(client, falsch):
+    falsch.karten = [karte(application_id=BOESE2)]
+    s = _abschnitt(client)
+    assert BOESE2 not in s and f'id="karte-{html.escape(BOESE2, quote=True)}"' in s
+
+
+@pytest.mark.parametrize(("felder", "not_aus", "erwartet"), [
+    ({}, False, ("", "Freigabe nötig")),
+    ({"wartet_auf_durchsicht": True}, False, ("", "Wartet auf Durchsicht")),
+    ({"ueberarbeitung": {"stand": "laeuft"}}, False, ("", "Feedback läuft")),
+    ({"ueberarbeitung": {"stand": "gescheitert"}}, False, ("warn", "Überarbeitung gescheitert")),
+    ({"ueberarbeitung": {"stand": "abgelehnt"}}, False, ("warn", "Feedback nicht umsetzbar")),
+    ({"autonom": {"stand": "empfaenger_pruefen"}}, False, ("warn", "Empfänger prüfen")),
+    ({"versand": {"kanal": "email", "an": "a@example.org", "warnung": "Freemail"}}, False,
+     ("warn", "Empfänger prüfen")),
+    ({"autonom": {"stand": "bereit", "faellig_am": None}}, True, ("warn", "bereit · Not-Aus hält")),
+    ({"autonom": {"stand": "bereit", "faellig_am": None}}, False, ("", "bereit")),
+    ({"autonom": {"stand": "bereit", "faellig_am": "2026-10-30T13:30:00+00:00"}}, False,
+     ("", "bereit · geht 14:30 (30.10.) raus")),
+    ({"autonom": {"stand": "offene_fragen"}}, False, ("", "Fragen offen")),
+    ({"autonom": {"stand": "feedback_offen"}}, False, ("", "Feedback läuft")),
+    ({"autonom": {"stand": "nach_feedback"}}, False, ("", "Freigabe nötig")),
+    ({"autonom": {"stand": "kaputt"}}, False, None),
+    ({"wartet_auf_durchsicht": True, "autonom": {"stand": "empfaenger_pruefen"}}, False,
+     ("warn", "Empfänger prüfen")),
+])
+def test_kurzstand_unterlagen(felder, not_aus, erwartet):
+    assert ui_freigabe_bewerbung._kurzstand(ui, karte(**felder), not_aus) == erwartet
+
+
+@pytest.mark.parametrize(("felder", "erwartet"), [
+    ({"zustand": "offline"}, ("warn", "Anzeige offline")),
+    ({"zustand": "unklar"}, ("warn", "Unklar, ob abgeschickt")),
+    ({"zustand": "wartet_auf_worker", "worker": {"laeuft": False, "seit": None}}, ("warn", "Bot läuft nicht")),
+    ({"zustand": "wartet_auf_worker"}, ("", "Bot liest das Formular")),
+    ({"zustand": "bereit", "hindernis": "captcha"}, ("warn", "bereit · Hindernis")),
+    ({"zustand": "bereit", "briefdatum_alter_tage": 8}, ("warn", "bereit · Datum prüfen")),
+    ({"zustand": "bereit"}, ("", "bereit")),
+    ({"zustand": "frage_offen"}, ("", "Fragen offen")),
+    ({"zustand": "selbst_bewerben", "grund": "captcha"}, ("warn", "Selbst bewerben")),
+    ({"zustand": "selbst_bewerben", "grund": "felix"}, ("", "Selbst bewerben")),
+    ({"zustand": "nix"}, None),
+])
+def test_kurzstand_portal(felder, erwartet):
+    assert ui_freigabe_bewerbung._portal_kurzstand(ui, pkarte(**felder)) == erwartet
+
+
+def test_portal_karte_ist_eine_zugeklappte_zeile(client, falsch):
+    falsch.karten = [pkarte(zustand="unklar")]
+    s = _abschnitt(client)
+    assert (f'<details class="karte" id="karte-{BID}"><summary><span class="badge">Portal</span>'
+            '<b class="titel" title="Muster GmbH – Data Engineer">Muster GmbH – Data Engineer</b>'
+            '<span class="stand warn">Unklar, ob abgeschickt</span></summary>') in s
+
+
+def test_zeile_hat_eigenes_css(client, falsch):
+    r = client.get(SEITE)
+    assert "#bewerbungen details.karte > summary .titel {" in r.text
+    assert "#bewerbungen details.karte > summary .stand.warn {" in r.text
