@@ -57,7 +57,9 @@ def mails_offen(b: Betrachter, suche: str = "",
         f"select count(*) as n from post_mails m where {where}", params)[0]["n"]
     seite = max(1, int(seite))
     zeilen = server._q(
-        f"select {post_struktur._spalten()}, m.ordner_stand, m.erledigt_am, "
+        # agent=b.ist_agent: dieselbe 3a-Schranke wie mails_suchen (R9) -
+        # heute ruft nur die Oberflaeche hier, 3b soll sie nicht umgehen.
+        f"select {post_struktur._spalten(agent=b.ist_agent)}, m.ordner_stand, m.erledigt_am, "
         "m.erledigt_art, m.bezahlt_am, m.abgleich_aus, k.kennung, "
         f"(select l.id from leads l where lower(l.email) = {ABSENDER_SQL} "
         "order by l.created_at limit 1) as lead_id "

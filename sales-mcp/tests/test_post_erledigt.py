@@ -104,6 +104,26 @@ def test_nur_eigene_mails(db):
     assert mid in _ids(BEN)
 
 
+def test_offene_mails_fuer_den_agenten_nur_kopf(db, monkeypatch):
+    """F3 (R9): ruft je ein Agent mails_offen, gilt dieselbe Schranke wie in
+    mails_suchen - ungepruefte Mails nur als Kopf; der Besitzer liest ganz."""
+    from post_struktur import BETREIBER_AGENT
+    monkeypatch.setenv("POST_BESITZER", "t_anna")
+    k = _konto(db)
+    ungeprueft = _mail(db, k)
+    lesbar = _mail(db, k)
+    db._q("update post_mails set geprueft_am = now(), enthaelt_anweisung = false "
+          "where id = %s returning 1", (lesbar,))
+    zeilen = {str(z["id"]): z for z in post_erledigt.mails_offen(BETREIBER_AGENT)[0]}
+    assert set(zeilen) == {ungeprueft, lesbar}
+    kopf = zeilen[ungeprueft]
+    assert (kopf["text"], kopf["auszug"], kopf["agent_hinweis"]) == (
+        None, None, "nicht_geprueft")
+    assert zeilen[lesbar]["text"] == "Text" and zeilen[lesbar]["agent_hinweis"] is None
+    besitzer = {str(z["id"]): z for z in post_erledigt.mails_offen(ANNA)[0]}
+    assert besitzer[ungeprueft]["text"] == "Text"
+
+
 def test_erledigen_und_wieder_oeffnen(db):
     mid = _mail(db, _konto(db))
     assert post_erledigt.erledigen(ANNA, mid, "erledigt") is True

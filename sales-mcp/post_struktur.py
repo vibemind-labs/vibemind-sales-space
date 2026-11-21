@@ -243,7 +243,21 @@ def sichtbar_sql(b: Betrachter) -> tuple[str, list]:
 
 # 3a: Den Inhalt einer Mail liest der Agent nur, wenn sie geprueft ist und
 # keine Anweisung an eine KI enthaelt - oder der Besitzer sie freigegeben hat.
-AGENT_LESBAR_SQL = "(m.geprueft_am is not null and (m.enthaelt_anweisung is false or m.anweisung_entscheid = 'freigegeben'))"
+# Hat der Besitzer sie gesperrt, bleibt sie gesperrt, auch wenn eine spaetere
+# Pruefung sie als unbedenklich einstuft (R9).
+AGENT_LESBAR_SQL = (
+    "(m.geprueft_am is not null "
+    "and m.anweisung_entscheid is distinct from 'gesperrt' "
+    "and (m.enthaelt_anweisung is false "
+    "or m.anweisung_entscheid = 'freigegeben'))")
+
+# Pruefenster (Final-Fix F1, R6): so viel einer Mail sehen Sortierer und
+# Nachpruefung (post_einordnung nimmt die Werte von hier) - und mehr bekommt
+# der Agent auch von einer lesbaren Mail nicht. Text, Empfaenger und
+# Anhangnamen, die die Pruefung nie sah, gelten nicht als geprueft.
+PRUEF_TEXT_MAX = 4000        # Zeichen Text
+PRUEF_KOPF_MAX = 300         # Zeichen je Kopfwert (Absender, Betreff, Empfaenger, Anhangname)
+PRUEF_ANHAENGE_MAX = 50      # Anhangnamen
 
 
 def _spalten(mit_vorschlaegen: bool = False, agent: bool = False) -> str:
@@ -252,19 +266,38 @@ def _spalten(mit_vorschlaegen: bool = False, agent: bool = False) -> str:
     # Konto, Absender, Datum, Betreff, Fach, Markierung), auch nicht fuer den
     # Besitzer. `is not false` behandelt NULL wie sensibel (fail closed).
     s = "m.sensibel is not false"
+    an, anhaenge, auszug, text = "m.an", "m.anhaenge", "m.auszug", "m.text"
     if agent:
+        import postfach
         # Fuer den Agenten zusaetzlich alles, was nicht lesbar ist (3a): nur
         # Kopf. `is not true` statt `not`, damit ein SQL-NULL in der Pruefung
         # (geprueft, aber ohne Ergebnis) den Text nicht durchlaesst.
         lesbar = f"({AGENT_LESBAR_SQL}) is true"
         s = f"({s} or ({AGENT_LESBAR_SQL}) is not true)"
         hinweis = (f", case when {lesbar} then null "
-                   "when m.enthaelt_anweisung is true then 'anweisung' "
+                   "when m.enthaelt_anweisung is true "
+                   "or m.anweisung_entscheid = 'gesperrt' then 'anweisung' "
                    "else 'nicht_geprueft' end as agent_hinweis")
         # Die Dringlichkeit stammt aus demselben Modellaufruf, der den
         # (womoeglich praeparierten) Text las - bei Nur-Kopf-Mails nicht an
         # den Agenten (Spec 3a.5: nur Absender, Betreff, Hinweis).
         dringlichkeit = f"case when {s} then null else m.dringlichkeit end"
+        # Auch eine lesbare Mail nur so weit, wie die Pruefung sie sah (F1).
+        # Die Zahlen sind Konstanten dieses Moduls, keine Eingaben.
+        n, kopf = int(PRUEF_TEXT_MAX), int(PRUEF_KOPF_MAX)
+        text = f"left(m.text, {n})"
+        an = f"left(m.an, {kopf})"
+        anhaenge = (f"array(select left(a.name, {kopf}) from unnest("
+                    f"m.anhaenge[1:{int(PRUEF_ANHAENGE_MAX)}]) with ordinality "
+                    "as a(name, nr) order by a.nr)")
+        # Der gespeicherte Auszug zieht Leerraum zusammen und kann so ueber
+        # das Fenster hinausreichen: bei langem Text neu aus dem Fenster.
+        # NULL-Text faellt in den else-Zweig und bleibt NULL (fail closed).
+        auszug = (f"case when length(m.text) <= {n} then m.auszug else "
+                  f"left(btrim(regexp_replace(left(m.text, {n}), '\\s+', ' ', 'g')), "
+                  f"{int(postfach.AUSZUG_MAX)}) end")
+        hinweis += (f", case when {s} then false "
+                    f"else coalesce(length(m.text) > {n}, false) end as text_gekuerzt")
     else:
         hinweis = ""
         dringlichkeit = "m.dringlichkeit"
@@ -273,10 +306,10 @@ def _spalten(mit_vorschlaegen: bool = False, agent: bool = False) -> str:
             f"m.ziel, m.ordner, m.ordner_am, {dringlichkeit} as dringlichkeit, "
             "m.enthaelt_anweisung, m.anweisung_entscheid, "
             f"case when {s} then false else m.kalenderteil end as kalenderteil, "
-            f"case when {s} then null else m.an end as an, "
-            f"case when {s} then '{{}}'::text[] else m.anhaenge end as anhaenge, "
-            f"case when {s} then null else m.auszug end as auszug, "
-            f"case when {s} then null else m.text end as text"
+            f"case when {s} then null else {an} end as an, "
+            f"case when {s} then '{{}}'::text[] else {anhaenge} end as anhaenge, "
+            f"case when {s} then null else {auszug} end as auszug, "
+            f"case when {s} then null else {text} end as text"
             + hinweis
             + (", " + _vorschlaege_spalte(s) if mit_vorschlaegen else ""))
 

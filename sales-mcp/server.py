@@ -4334,10 +4334,12 @@ def _mid_norm(mid) -> str:
 
 
 def _post_uid_aufloesen(uid) -> tuple:
-    """(legacy_uid, fehler, erwartete_message_id) fuer mail_beantworten/
-    mail_einstufen (R16). `post:<id>` wird ueber die Sichtbarkeit des Bots
-    geprueft und nur fuer aktive env-Konten mit echter IMAP-Nummer in die
-    alte uid uebersetzt. Die erwartete Message-ID muss der Aufrufer nach dem
+    """(legacy_uid, fehler, erwartete_message_id, nur_kopf) fuer
+    mail_beantworten/mail_einstufen (R16). `nur_kopf` ist wahr, wenn der
+    Agent die `post:`-Mail nur als Kopf sieht (3a, `agent_hinweis`): dann
+    darf aus dem Live-Lesen nichts aus Text oder Kalenderdatei folgen (F2).
+    `post:<id>` wird ueber die Sichtbarkeit des Bots geprueft und nur fuer
+    aktive env-Konten mit echter IMAP-Nummer in die alte uid uebersetzt. Die erwartete Message-ID muss der Aufrufer nach dem
     IMAP-Lesen gegen die geholte Mail pruefen (_mail_passt): nach einem
     UIDVALIDITY-Wechsel kann die gespeicherte Nummer auf eine ANDERE Mail
     zeigen. Alte uids gelten nur, solange die Sammelstelle leer ist: sonst
@@ -4348,13 +4350,13 @@ def _post_uid_aufloesen(uid) -> tuple:
         mail = post_struktur.mail_lesen(post_struktur.BETREIBER_AGENT,
                                         roh[5:].strip())
         if mail is None or not mail.get("konto_id"):
-            return None, nicht_da, None
+            return None, nicht_da, None, False
         konto = _q("select kennung, quelle, aktiv from post_konten "
                    "where id = %s", (str(mail["konto_id"]),))
         zeile = _q("select imap_uid, message_id, message_id_ersatz from post_mails "
                    "where id = %s", (str(mail["id"]),))
         if not konto or not konto[0]["aktiv"] or not zeile:
-            return None, nicht_da, None
+            return None, nicht_da, None, False
         if zeile[0]["message_id_ersatz"]:
             # M3: ohne echte Message-ID laesst sich nach dem IMAP-Lesen nicht
             # beweisen, dass unter der Nummer noch DIESE Mail liegt.
@@ -4362,28 +4364,30 @@ def _post_uid_aufloesen(uid) -> tuple:
                 "Diese Mail hat keine Message-ID - Antworten/Aufraeumen ueber "
                 "den Bot ist dafuer nicht moeglich (die Mail laesst sich im "
                 "Postfach nicht sicher wiedererkennen). Bitte "
-                "betreiber_mail_entwurf nutzen.")}), None
+                "betreiber_mail_entwurf nutzen.")}), None, False
         mid = _mid_norm(zeile[0]["message_id"])
         if (konto[0]["quelle"] != "env" or (zeile[0]["imap_uid"] or 0) <= 0
                 or not mid):
-            return None, _json({"fehler": _STUFE2_HINWEIS}), None
+            return None, _json({"fehler": _STUFE2_HINWEIS}), None, False
         k, nr = konto[0]["kennung"], zeile[0]["imap_uid"]
+        # Fail closed: fehlt die Spalte, gilt die Mail als nur Kopf.
+        nur_kopf = mail.get("agent_hinweis", "fehlt") is not None
         if k == postfach.HAUPT:
-            return str(nr), None, mid
+            return str(nr), None, mid, nur_kopf
         if k in postfach.ANBIETER:
-            return f"{k}:{nr}", None, mid
-        return None, _json({"fehler": _STUFE2_HINWEIS}), None
+            return f"{k}:{nr}", None, mid, nur_kopf
+        return None, _json({"fehler": _STUFE2_HINWEIS}), None, False
     if not _sammelstelle_leer():
-        return None, nicht_da, None
+        return None, nicht_da, None, False
     # M1 / R15: auch bei leerer Sammelstelle nie live in GMX/Gmail (dort liegt
     # Privates) - alte uids nur fuers Hauptpostfach, wie postfach_mail_lesen.
     try:
         kennung, _ = postfach.zerlegen(roh)
     except ValueError:
-        return roh, None, None       # Meldung kommt wie bisher aus _postfach_fehlt
+        return roh, None, None, False       # Meldung kommt wie bisher aus _postfach_fehlt
     if kennung != postfach.HAUPT:
-        return None, nicht_da, None
-    return roh, None, None
+        return None, nicht_da, None, False
+    return roh, None, None, False
 
 
 def _mail_passt(mail, erwartet) -> bool:
@@ -4394,7 +4398,12 @@ def _mail_passt(mail, erwartet) -> bool:
     return _mid_norm((mail or {}).get("message_id")) == erwartet
 
 
-def _imap_lesen_geprueft(uid, erwartet) -> tuple:
+# Was von einer live gelesenen Nur-Kopf-Mail weiterverwendet werden darf (F2):
+# Kopf und Kennungen, nie Text, Empfaenger, Anhaenge oder Kalenderauswertung.
+_NUR_KOPF_FELDER = ("uid", "postfach", "von", "betreff", "datum", "message_id")
+
+
+def _imap_lesen_geprueft(uid, erwartet, nur_kopf: bool = False) -> tuple:
     """(mail, fehler_json) fuer mail_beantworten/mail_einstufen.
 
     M2: mit erwarteter Message-ID (post:-uid) wird OHNE Nebenwirkung gelesen
@@ -4402,9 +4411,13 @@ def _imap_lesen_geprueft(uid, erwartet) -> tuple:
     und nur bei passender Mail die Kalenderantwort festgehalten - nach einem
     UIDVALIDITY-Wechsel zeigt die Nummer sonst auf eine fremde Mail, deren
     Antwort an einem fremden Kontakt landen wuerde. Alte uids (erwartet None)
-    lesen wie bisher."""
+    lesen wie bisher.
+
+    F2 (R8): `nur_kopf` (der Agent sieht die Mail nur als Kopf) haelt die
+    Kalenderantwort nie fest - ihr Grund landete sonst in einer Notiz, die
+    der Digest dem Agenten zeigt - und gibt nur die Kopffelder zurueck."""
     try:
-        if erwartet is None:
+        if erwartet is None and not nur_kopf:
             mail = postfach.lesen(str(uid))
         else:
             mail = postfach.lesen(str(uid), protokollieren=False)
@@ -4412,9 +4425,11 @@ def _imap_lesen_geprueft(uid, erwartet) -> tuple:
         return None, _json({"fehler": f"Postfach nicht erreichbar ({type(e).__name__})."})
     if not mail:
         return None, _json({"fehler": f"Mail nicht mehr im Postfach (uid {uid})."})
+    if erwartet is not None and not _mail_passt(mail, erwartet):
+        return None, _json({"fehler": "nicht verfuegbar"})
+    if nur_kopf:
+        return {k: mail[k] for k in _NUR_KOPF_FELDER if k in mail}, None
     if erwartet is not None:
-        if not _mail_passt(mail, erwartet):
-            return None, _json({"fehler": "nicht verfuegbar"})
         postfach.kalender_festhalten(mail)
     return mail, None
 
@@ -4428,8 +4443,8 @@ def _kalenderantwort_live(post_uid: str) -> dict:
     nach der Identitaetspruefung eine Nebenwirkung (M2). Rueckgabe: die Felder
     fuer die Ausgabe (kalender_antwort/protokollierfehler oder ein Hinweis)."""
     hinweis = "Kalenderantwort nicht ausgewertet"
-    uid, fehler, erwartet = _post_uid_aufloesen(post_uid)
-    if fehler or erwartet is None:
+    uid, fehler, erwartet, nur_kopf = _post_uid_aufloesen(post_uid)
+    if fehler or erwartet is None or nur_kopf:
         return {"kalender_hinweis": f"{hinweis} (Postfach dafuer nicht live lesbar)."}
     if not postfach.eingerichtet(uid):
         return {"kalender_hinweis": f"{hinweis} (Postfach nicht eingerichtet)."}
@@ -4556,12 +4571,12 @@ def mail_einstufen(uid: str, art: str, grund: str) -> str:
     grund = " ".join(str(grund or "").split())[:300]
     if not grund:
         return _json({"fehler": "Bitte einen Grund in einem Satz nennen."})
-    uid, fehler, erwartet = _post_uid_aufloesen(uid)
+    uid, fehler, erwartet, nur_kopf = _post_uid_aufloesen(uid)
     if fehler:
         return fehler
     if not postfach.eingerichtet(uid):
         return _json({"fehler": _postfach_fehlt(uid)})
-    mail, fehler = _imap_lesen_geprueft(uid, erwartet)
+    mail, fehler = _imap_lesen_geprueft(uid, erwartet, nur_kopf)
     if fehler:
         return fehler
     _postfach_merken([{**mail, "auszug": (mail.get("text") or "")[:600]}])
@@ -4625,12 +4640,12 @@ def mail_beantworten(uid: str, text: str, thema: str = "",
     uid "post:<id>" aus postfach_lesen wird auf die IMAP-Mail uebersetzt (nur Konten aus der
     Umgebung; fuer ueber die Oberflaeche angelegte Postfaecher kommt das mit Stufe 2)."""
     uid_roh = uid
-    uid, fehler, erwartet = _post_uid_aufloesen(uid)
+    uid, fehler, erwartet, nur_kopf = _post_uid_aufloesen(uid)
     if fehler:
         return fehler
     if not postfach.eingerichtet(uid):
         return _json({"fehler": _postfach_fehlt(uid)})
-    mail, fehler = _imap_lesen_geprueft(uid, erwartet)
+    mail, fehler = _imap_lesen_geprueft(uid, erwartet, nur_kopf)
     if fehler:
         return fehler
     name, adresse = parseaddr(mail.get("von") or "")
@@ -4685,6 +4700,8 @@ def postfach_mail_lesen(uid: str) -> str:
     Ist die Mail noch nicht geprueft oder enthaelt sie eine Anweisung an eine
     KI (ohne Freigabe des Besitzers), kommen nur Absender und Betreff und ein
     fester `hinweis` - Text, Auszug, Empfaenger und Anhaenge bleiben leer.
+    Der Text einer lesbaren Mail reicht nur so weit, wie die Pruefung ihn
+    sah; `gekuerzt: true` heisst, im Postfach steht mehr.
 
     Traegt die Mail einen Kalenderteil (`kalenderteil: true`), wird sie einmal
     live im Postfach gelesen und eine Antwort auf eine Einladung wie frueher
@@ -4720,6 +4737,9 @@ def postfach_mail_lesen(uid: str) -> str:
             "uid": f"post:{mail['id']}", "von": mail["von"],
             "an": mail["an"], "betreff": mail["betreff"],
             "datum": mail["datum"], "text": mail["text"],
+            # F1: der Agent liest nur, was die Pruefung sah (post_struktur.
+            # PRUEF_TEXT_MAX); true = der Text ist hier abgeschnitten.
+            "gekuerzt": bool(mail.get("text_gekuerzt")),
             "auszug": mail["auszug"], "anhaenge": mail["anhaenge"],
             "postfach": kennung, "fach": mail["fach"],
             "unterfach": mail.get("unterfach"),

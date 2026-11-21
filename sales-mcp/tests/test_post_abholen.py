@@ -1283,6 +1283,31 @@ def test_nachpruefung_aendert_nur_pruefung(monkeypatch):
     assert konten[0]["kennung"] == "gmx-test"
 
 
+def test_warteschlange_gibt_anhaenge_und_empfaenger_mit(monkeypatch):
+    """F1 (R6): neue Einordnung und Nachpruefung bekommen Empfaenger und
+    Anhangnamen - was der Agent spaeter sieht, sieht vorher die Pruefung."""
+    k = _konto()["id"]
+    neu = _pruef_mail(k, 1, "2026-11-20T10:00:00Z", "neu")
+    alt = _pruef_mail(k, 2, "2026-11-19T10:00:00Z")
+    ohne = _pruef_mail(k, 3, "2026-11-18T10:00:00Z")
+    server._q("update post_mails set an = 'chef@x.de', anhaenge = '{a.pdf,b.pdf}' "
+              "where id = any(%s::uuid[]) returning 1", ([neu, alt],))
+    server._q("update post_mails set an = null, anhaenge = null where id = %s "
+              "returning 1", (ohne,))
+    mails = {}
+
+    def merken(mail, konto):
+        mails[mail["id"]] = mail
+        return (post_einordnung.Pruefung(False, "nichts") if mail["id"] != neu
+                else _einordnung())
+    monkeypatch.setattr(post_einordnung, "einordnen", merken)
+    monkeypatch.setattr(post_einordnung, "nachpruefen", merken)
+    post_abholen.einordnen_offene(5)
+    for mid in (neu, alt):
+        assert (mails[mid]["an"], mails[mid]["anhaenge"]) == ("chef@x.de", ["a.pdf", "b.pdf"])
+    assert (mails[ohne]["an"], mails[ohne]["anhaenge"]) == ("", [])
+
+
 def test_nachpruefung_ueberspringt(monkeypatch):
     k = _konto()["id"]
     _pruef_mail(k, 1, "2026-11-19T10:00:00Z", sensibel=True)

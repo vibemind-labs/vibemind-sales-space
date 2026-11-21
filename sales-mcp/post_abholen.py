@@ -483,8 +483,9 @@ def einordnen_offene(grenze: int) -> int:
         return 0
     # Das Konto bestimmt den Standardbereich (Spec v2 §5.1); ohne Konto-Zeile
     # (sollte es nicht geben) gilt der Standard von post_einordnung.
-    spalten = ("m.id, m.besitzer, m.von, m.betreff, m.datum, m.text, m.imap_uid, "
-               "m.urspruengliche_adresse, k.kennung, k.standard_bereich from post_mails m "
+    spalten = ("m.id, m.besitzer, m.von, m.betreff, m.datum, m.text, m.an, m.anhaenge, "
+               "m.imap_uid, m.urspruengliche_adresse, k.kennung, k.standard_bereich "
+               "from post_mails m "
                "left join post_konten k on k.id = m.konto_id ")
     offene = server._q(
         f"select 'neu' as art, {spalten} where m.status = 'neu' "
@@ -502,12 +503,17 @@ def einordnen_offene(grenze: int) -> int:
         if _STOPP.is_set():
             break
         # besitzer nur fuer die Regelauswahl (R13); an das Modell geht er nicht
-        # (post_einordnung._auftrag nimmt nur Absender, Betreff, Datum, Text).
+        # (post_einordnung._auftrag nimmt Absender, Betreff, Datum, Empfaenger,
+        # Anhangnamen und Text). Empfaenger und Anhaenge sieht der Agent bei
+        # einer lesbaren Mail, also prueft das Modell sie mit (F1); sensible
+        # Mails haben sie gar nicht erst gespeichert.
         mail = {"id": str(zeile["id"]), "besitzer": zeile["besitzer"],
                 "von": zeile["von"] or "",
                 "betreff": zeile["betreff"] or "",
                 "datum": zeile["datum"].isoformat() if zeile["datum"] else "",
                 "text": zeile["text"] or "",
+                "an": zeile["an"] or "",
+                "anhaenge": list(zeile["anhaenge"] or []),
                 "urspruengliche_adresse": zeile["urspruengliche_adresse"] or None}
         konto = {"kennung": zeile["kennung"], "standard_bereich": zeile["standard_bereich"]}
         if zeile["art"] == "nachpruefen":
