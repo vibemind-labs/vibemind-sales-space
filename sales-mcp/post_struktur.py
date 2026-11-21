@@ -271,7 +271,7 @@ def _spalten(mit_vorschlaegen: bool = False, agent: bool = False) -> str:
     return ("m.id, m.konto_id, m.besitzer, m.von, m.betreff, m.datum, "
             "m.bereich, m.fach, m.unterfach, m.sensibel, m.status, m.gesehen_am, "
             f"m.ziel, m.ordner, m.ordner_am, {dringlichkeit} as dringlichkeit, "
-            "m.enthaelt_anweisung, "
+            "m.enthaelt_anweisung, m.anweisung_entscheid, "
             f"case when {s} then false else m.kalenderteil end as kalenderteil, "
             f"case when {s} then null else m.an end as an, "
             f"case when {s} then '{{}}'::text[] else m.anhaenge end as anhaenge, "

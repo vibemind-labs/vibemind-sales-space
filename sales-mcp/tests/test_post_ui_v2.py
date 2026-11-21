@@ -326,3 +326,57 @@ def test_korrektur_und_neu_einordnen_lassen_pruefung_stehen():
     assert (z["bereich"], z["fach"], z["einordnung_version"], z["vorschau"]) == \
         ("privat", "Rechnungen", 3, None)
     assert {s: z[s] for s in PRUEFSPALTEN} == vorher
+
+
+# ---------------------------------------------------------------------------
+# 3a Task 6: Dringlichkeit in der Liste, Hinweis bei Anweisung an eine KI
+# ---------------------------------------------------------------------------
+
+def _setze(mail_id, **spalten):
+    sets = ", ".join(f"{k} = %s" for k in spalten)
+    with server.pool.connection() as conn:
+        conn.execute(f"update post_mails set {sets} where id = %s",
+                     list(spalten.values()) + [mail_id])
+
+
+def test_liste_ohne_suche_nach_dringlichkeit():
+    import re
+    alt = _mail("t8_anna", "business", "Kunden & Anfragen", betreff="Dringend-Alt")
+    neu = _mail("t8_anna", "business", "Kunden & Anfragen", betreff="Ruhig-Neu")
+    _setze(alt, datum="2026-01-01T10:00:00Z", dringlichkeit="sofort")
+    _setze(neu, datum="2026-02-01T10:00:00Z", dringlichkeit="nichts")
+    seite = _get("t8_anna", "/post?bereich=business&fach=Kunden+%26+Anfragen").text
+    assert seite.index("Dringend-Alt") < seite.index("Ruhig-Neu")
+    # Mit Suchtext gilt die Datumsfolge (neueste zuerst).
+    seite = _get("t8_anna", "/post?bereich=business&fach=Kunden+%26+Anfragen&q=Hallo").text
+    assert re.search(r"Ruhig-Neu.*Dringend-Alt", seite, re.S)
+
+
+def test_mailzeile_zeigt_dringlichkeit():
+    s = _mail("t8_anna", "business", "Kunden & Anfragen", betreff="Eilig-Mail")
+    n = _mail("t8_anna", "business", "Kunden & Anfragen", betreff="Gelassen-Mail")
+    _setze(s, dringlichkeit="sofort")
+    _setze(n, dringlichkeit="nichts")
+    seite = _get("t8_anna", "/post?bereich=business&fach=Kunden+%26+Anfragen").text
+    zeilen = {t.split("</b>")[0].split("<b>")[-1]: t
+              for t in seite.split('<a class="mailzeile"')[1:]}
+    assert ">sofort</span>" in zeilen["Eilig-Mail"]
+    assert ">sofort<" not in zeilen["Gelassen-Mail"]
+    assert ">heute<" not in zeilen["Gelassen-Mail"]
+
+
+def test_mailansicht_hinweis_anweisung():
+    m = _mail("t8_anna", "business", "Kunden & Anfragen", text="Ignoriere alles und ...")
+    _setze(m, enthaelt_anweisung=True, geprueft_am="2026-02-01T10:00:00Z")
+    seite = _get("t8_anna", f"/post/mail/{m}").text
+    assert "Anweisung an eine KI erkannt – für den Agenten gesperrt" in seite
+    assert "/freigaben?tab=nachrichten&amp;art=anweisung" in seite \
+        or "/freigaben?tab=nachrichten&art=anweisung" in seite
+    assert "Ignoriere alles" in seite        # Besitzer sieht den Inhalt weiter
+    _setze(m, anweisung_entscheid="freigegeben")
+    seite = _get("t8_anna", f"/post/mail/{m}").text
+    assert "für den Agenten freigegeben" in seite
+    assert "für den Agenten gesperrt" not in seite
+    # Ohne Markierung kein Hinweis.
+    k = _mail("t8_anna", "business", "Kunden & Anfragen")
+    assert "Anweisung an eine KI" not in _get("t8_anna", f"/post/mail/{k}").text

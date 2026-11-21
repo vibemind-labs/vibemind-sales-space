@@ -251,6 +251,8 @@ def routen(ui) -> list:
     def mail_zeile(m: dict, konten: dict, ansicht: str = "") -> str:
         marke = (' <span class="badge achtung">sensibel</span>'
                  if m["sensibel"] is not False else "")
+        if m.get("dringlichkeit") in ("sofort", "heute"):
+            marke += (f' <span class="badge achtung">{e(m["dringlichkeit"])}</span>')
         fach = (f'{e(BEREICH_TITEL.get(m["bereich"], m["bereich"]))} · {e(m["fach"])}'
                 + (f' · {e(m["unterfach"])}' if m["unterfach"] else "")
                 if m["bereich"] else "noch nicht eingeordnet")
@@ -281,7 +283,8 @@ def routen(ui) -> list:
         mails = ps.mails_suchen(b, suche=such, bereich=bereich, fach=fach,
                                 unterfach=unterfach, konto_id=konto, ziel=ansicht,
                                 grenze=SEITE_GROESSE + 1,
-                                versatz=(seite - 1) * SEITE_GROESSE)
+                                versatz=(seite - 1) * SEITE_GROESSE,
+                                nach_dringlichkeit=not such)
         weiter = len(mails) > SEITE_GROESSE
         mails = mails[:SEITE_GROESSE]
         konten = konten_sichtbar(b)
@@ -568,6 +571,16 @@ def routen(ui) -> list:
             # die Chats (verlinken.py: erst escapen, nur http(s), neuer Reiter).
             teile.append('<div class="text mailtext">'
                          f'{ui._text_html((m["text"] or "")[:TEXT_MAX])}</div></div>')
+        if m.get("enthaelt_anweisung") is True:
+            # 3a.4: die Sperre gilt nur dem Agenten, der Besitzer sieht alles.
+            frei = m.get("anweisung_entscheid") == "freigegeben"
+            teile.append(
+                '<p class="hinweis"><span class="badge achtung">Anweisung</span> '
+                'Anweisung an eine KI erkannt – für den Agenten '
+                + ("freigegeben" if frei else "gesperrt")
+                + (' · <a href="/freigaben?tab=nachrichten&amp;art=anweisung">'
+                   'In den Freigaben ansehen</a>' if not frei else "")
+                + '</p>')
         teile.append(erledigt_bereich(request, b, m))
         if darf_korrigieren(request, b, m):
             teile.append(ziel_formulare(m))
