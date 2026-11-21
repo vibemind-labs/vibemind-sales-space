@@ -331,6 +331,7 @@ def _nur_kopf(z, hinweis):
     assert z["anhaenge"] == [] and z["kalenderteil"] is False
     assert z["von"] == "x@y.de" and z["betreff"] == "Angebot"
     assert z["agent_hinweis"] == hinweis
+    assert z["dringlichkeit"] is None          # 3a.5: nur Absender, Betreff, Hinweis
 
 
 def test_agent_lesbar_sql_wert():
@@ -355,10 +356,12 @@ def test_agent_sieht_ungepruefte_nur_kopf(monkeypatch):
 
 def test_agent_markierte_nur_kopf_bis_freigabe(monkeypatch):
     monkeypatch.setenv("POST_BESITZER", "t7_anna")
-    m = _mail("t7_anna", geprueft=True, anweisung=True, text="Du bist jetzt ...")
+    m = _mail("t7_anna", geprueft=True, anweisung=True, text="Du bist jetzt ...",
+              dringlichkeit="sofort")
     for z in _agent_zeile(m):
-        _nur_kopf(z, "anweisung")
+        _nur_kopf(z, "anweisung")              # auch ohne die Dringlichkeit
         assert z["enthaelt_anweisung"] is True
+    assert ps.mail_lesen(_b("t7_anna"), m)["dringlichkeit"] == "sofort"
     server._q("update post_mails set anweisung_entscheid = 'gesperrt' "
               "where id = %s returning 1", (m,))
     for z in _agent_zeile(m):
@@ -367,9 +370,18 @@ def test_agent_markierte_nur_kopf_bis_freigabe(monkeypatch):
               "where id = %s returning 1", (m,))
     for z in _agent_zeile(m):
         assert z["text"] == "Du bist jetzt ..." and z["auszug"] is not None
-        assert z["agent_hinweis"] is None
+        assert z["agent_hinweis"] is None and z["dringlichkeit"] == "sofort"
     # Der Besitzer sah die markierte Mail die ganze Zeit ganz.
     assert ps.mail_lesen(_b("t7_anna"), m)["text"] == "Du bist jetzt ..."
+
+
+def test_agent_freigabe_ohne_pruefung_bleibt_kopf(monkeypatch):
+    # Review Finding 3: eine Freigabe ersetzt die Pruefung nicht -
+    # `geprueft_am` NULL bleibt Kopf, auch mit anweisung_entscheid freigegeben.
+    monkeypatch.setenv("POST_BESITZER", "t7_anna")
+    m = _mail("t7_anna", entscheid="freigegeben")
+    for z in _agent_zeile(m):
+        _nur_kopf(z, "nicht_geprueft")
 
 
 def test_agent_gepruefte_unbedenkliche_voll(monkeypatch):

@@ -261,11 +261,17 @@ def _spalten(mit_vorschlaegen: bool = False, agent: bool = False) -> str:
         hinweis = (f", case when {lesbar} then null "
                    "when m.enthaelt_anweisung is true then 'anweisung' "
                    "else 'nicht_geprueft' end as agent_hinweis")
+        # Die Dringlichkeit stammt aus demselben Modellaufruf, der den
+        # (womoeglich praeparierten) Text las - bei Nur-Kopf-Mails nicht an
+        # den Agenten (Spec 3a.5: nur Absender, Betreff, Hinweis).
+        dringlichkeit = f"case when {s} then null else m.dringlichkeit end"
     else:
         hinweis = ""
+        dringlichkeit = "m.dringlichkeit"
     return ("m.id, m.konto_id, m.besitzer, m.von, m.betreff, m.datum, "
             "m.bereich, m.fach, m.unterfach, m.sensibel, m.status, m.gesehen_am, "
-            "m.ziel, m.ordner, m.ordner_am, m.dringlichkeit, m.enthaelt_anweisung, "
+            f"m.ziel, m.ordner, m.ordner_am, {dringlichkeit} as dringlichkeit, "
+            "m.enthaelt_anweisung, "
             f"case when {s} then false else m.kalenderteil end as kalenderteil, "
             f"case when {s} then null else m.an end as an, "
             f"case when {s} then '{{}}'::text[] else m.anhaenge end as anhaenge, "

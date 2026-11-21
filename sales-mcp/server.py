@@ -4268,6 +4268,21 @@ def _agent_hinweis(zeile: dict) -> dict:
     return {"hinweis": AGENT_HINWEIS.get(art, AGENT_HINWEIS["nicht_geprueft"])}
 
 
+def _agent_dringlichkeit(zeile: dict):
+    """Dringlichkeit nur fuer ganz lesbare Mails (3a.5); post_struktur leert
+    sie fuer Nur-Kopf-Mails schon in SQL, hier Tiefenverteidigung."""
+    return None if zeile.get("agent_hinweis") else zeile.get("dringlichkeit")
+
+
+def _imap_nur_kopf(mail: dict) -> dict:
+    """Rueckfall per IMAP mit Sammelstellen-Besitzer (3a.5): jede so gelesene
+    Mail ist ungeprueft - nur Kopf und fester Hinweis, nie Text oder Auszug."""
+    kopf = {k: mail.get(k) for k in ("uid", "von", "betreff", "datum", "postfach")
+            if k in mail}
+    kopf["hinweis"] = AGENT_HINWEIS["nicht_geprueft"]
+    return kopf
+
+
 def _sammelstelle_lesen(anzahl: int, wahl: str, suche: str) -> str:
     """Business-Mails aus der Sammelstelle fuer den Bot. BETREIBER_AGENT
     sieht nie Privates und nie Sensibles (Spec §14.3) - die Auswahl macht
@@ -4303,7 +4318,7 @@ def _sammelstelle_lesen(anzahl: int, wahl: str, suche: str) -> str:
         # ausgewertet und am Kontakt festgehalten, wenn postfach_mail_lesen
         # die Mail oeffnet; das Feld zeigt, welche das sind.
         "kalenderteil": bool(z.get("kalenderteil")),
-        "dringlichkeit": z.get("dringlichkeit"),
+        "dringlichkeit": _agent_dringlichkeit(z),
         **_agent_hinweis(z),
     } for z in zeilen]
     return _json({"anzahl": len(mails), "mails": mails})
@@ -4452,9 +4467,13 @@ def postfach_lesen(anzahl: int = 10, postfach: str = "",
     Die uid hat die Form "post:<id>" — genau so an postfach_mail_lesen.
 
     Rueckfall: solange die Sammelstelle noch keine einzige Mail kennt
-    (Abhol-Dienst laeuft noch nicht), liest das Werkzeug wie frueher die
-    neuesten Mails der INBOX des Hauptpostfachs live per IMAP. Fuer GMX/Gmail
-    gibt es diesen Rueckfall nie (dort liegt auch Privates)."""
+    (Abhol-Dienst laeuft noch nicht), liest das Werkzeug die neuesten Mails
+    der INBOX des Hauptpostfachs live per IMAP. Fuer GMX/Gmail gibt es diesen
+    Rueckfall nie (dort liegt auch Privates). Hat dieser Container einen
+    Post-Besitzer (POST_BESITZER), ist jede so gelesene Mail ungeprueft: dann
+    kommen nur uid, von, betreff, datum, postfach und `hinweis`, kein Auszug,
+    und `suche` sucht nur in Absender und Betreff. Ohne Post-Besitzer (Laden
+    ohne Sammelstelle) bleibt es beim Auszug wie bisher."""
     wahl = str(postfach or "").strip().lower()
     try:
         anzahl = max(1, min(int(anzahl), 200))
@@ -4480,10 +4499,14 @@ def postfach_lesen(anzahl: int = 10, postfach: str = "",
             f"Postfach nicht erreichbar ({type(e).__name__}) — Zugang "
             f"und Netz pruefen, Details im Container-Log."),
             "nicht_erreichbar": {postfach_modul.HAUPT: type(e).__name__}})
+    # 3a.5: mit Sammelstellen-Besitzer ist alles hier ungeprueft - auch die
+    # Suche darf nicht im Text treffen (sonst waere sie ein Orakel ueber ihn).
+    nur_kopf = bool(post_struktur.container_besitzer())
     if suche:
         n = suche.lower()
+        felder = ("von", "betreff") if nur_kopf else ("von", "betreff", "auszug")
         mails = [m for m in mails if n in " ".join(
-            str(m.get(k) or "") for k in ("von", "betreff", "auszug")).lower()]
+            str(m.get(k) or "") for k in felder).lower()]
     # Suchindex (28.10.2026): jede gesehene Mail landet in postfach_mails,
     # damit /posteingang sie durchsuchen kann. Ein Fehler hier kostet nur
     # den Index.
@@ -4492,6 +4515,8 @@ def postfach_lesen(anzahl: int = 10, postfach: str = "",
     except psycopg.Error:
         pass
     mails = mails[:anzahl]
+    if nur_kopf:
+        mails = [_imap_nur_kopf(m) for m in mails]
     return _json({"anzahl": len(mails), "mails": mails})
 
 
@@ -4667,7 +4692,11 @@ def postfach_mail_lesen(uid: str) -> str:
     aus der Umgebung; sonst steht ein `kalender_hinweis` da).
 
     Aeltere uids (nackte Nummer des Hauptpostfachs) laufen weiter live per
-    IMAP. uids "gmx:<n>" / "gmail:<n>" gibt es, sobald die Sammelstelle Mails
+    IMAP, solange die Sammelstelle leer ist. Hat dieser Container einen
+    Post-Besitzer (POST_BESITZER), ist so eine Mail ungeprueft: nur uid, von,
+    betreff, datum, postfach und `hinweis`, kein Text, keine Empfaenger, keine
+    Kalenderauswertung; ohne Post-Besitzer kommt der Volltext wie bisher.
+    uids "gmx:<n>" / "gmail:<n>" gibt es, sobald die Sammelstelle Mails
     kennt, nicht mehr (dort liegt auch Privates) -> "nicht verfuegbar".
 
     `protokollierfehler` (W5, Schlusspruefung 11.09.2026): ist dieses Feld
@@ -4695,7 +4724,7 @@ def postfach_mail_lesen(uid: str) -> str:
             "postfach": kennung, "fach": mail["fach"],
             "unterfach": mail.get("unterfach"),
             "kalenderteil": bool(mail.get("kalenderteil")),
-            "dringlichkeit": mail.get("dringlichkeit"),
+            "dringlichkeit": _agent_dringlichkeit(mail),
             **_agent_hinweis(mail)}
         # Nur-Kopf-Mails (3a) liefert post_struktur schon mit kalenderteil
         # false; die zweite Bedingung ist Tiefenverteidigung - sonst ginge
@@ -4717,15 +4746,19 @@ def postfach_mail_lesen(uid: str) -> str:
         return nicht_da
     if not postfach.eingerichtet(uid):
         return _json({"fehler": _postfach_fehlt(uid)})
+    # 3a.5: mit Sammelstellen-Besitzer ist die live gelesene Mail ungeprueft -
+    # nur Kopf und Hinweis, und die Kalenderantwort wird nicht ausgewertet.
+    nur_kopf = bool(post_struktur.container_besitzer())
     try:
-        mail = postfach.lesen(uid)
+        mail = (postfach.lesen(uid, protokollieren=False) if nur_kopf
+                else postfach.lesen(uid))
     except Exception as e:  # noqa: BLE001
         return _json({"fehler": (
             f"Postfach nicht erreichbar ({type(e).__name__}) — Zugang "
             f"und Netz pruefen, Details im Container-Log.")})
     if mail is None:
         return _json({"fehler": f"Keine Mail mit uid {uid} in der INBOX."})
-    return _json(mail)
+    return _json(_imap_nur_kopf(mail) if nur_kopf else mail)
 
 
 # ---------------------------------------------------------------------------
