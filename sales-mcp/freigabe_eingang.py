@@ -23,6 +23,9 @@ ART_JE_HERKUNFT = {
     "sales": "entwurf",
     "marketing": "entwurf",
     "marketing-video": "marketing_video",
+    # Post-Assistent 3a: Mail mit Anweisung an eine KI. Entsteht nur in sales-post
+    # (post_anweisung.py), darum keine Herkunft der Freigabe-API und kein Schluessel.
+    "post": "post_anweisung",
 }
 HERKUNFT_ANZEIGE = {
     "debugger-claw": "Debugger-Claw",
@@ -31,7 +34,10 @@ HERKUNFT_ANZEIGE = {
     "sales": "Sales",
     "marketing": "Marketing",
     "marketing-video": "Marketing-Video",
+    "post": "Post",
 }
+# Arten, die der Freigabe-Bote nie nach Rowboat spiegelt: private Post bleibt auf /freigaben.
+NICHT_NACH_ROWBOAT = ("post_anweisung",)
 # Stufe 2 (Annehmen fuehrt etwas aus) bleibt gesperrt, solange 5.5 nicht geloest ist.
 STUFE2_ENTSPERRT = False
 EINSTELLUNG_STUFE2 = "freigabe_stufe2"
@@ -67,8 +73,15 @@ def _titel(titel: str) -> str:
     return einzeilig[:_TITEL_MAX]
 
 
+# Einziger erlaubter Link ohne Rechner: eine Mail der Post-Sammelstelle (nur fuer ihren
+# Besitzer lesbar, ui_post / post_struktur.mail_lesen).
+_POST_MAIL_LINK = re.compile(r"^/post/mail/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
 def _link(link) -> str | None:
     if isinstance(link, str) and re.match(r"^https?://\S+$", link.strip(), re.I):
+        return link.strip()
+    if isinstance(link, str) and _POST_MAIL_LINK.match(link.strip()):
         return link.strip()
     return None
 

@@ -24,6 +24,8 @@ from starlette.routing import Route
 
 import auftrag_buch
 import freigabe_eingang as fe
+import post_anweisung
+import post_struktur
 import server
 
 LOG = logging.getLogger("sales-ui")
@@ -41,6 +43,7 @@ _ART_NAME = {
     "kursfreigabe": "Kursfreigaben",
     "entwurf": "Entwürfe",
     "marketing_video": "Videos",
+    "post_anweisung": "Mails mit Anweisung an eine KI",
 }
 # Wo die Arten auf /freigaben stehen (Freigaben in Reitern, Betreiber 09.11.2026):
 # (art, Reiter, Unter-Reiter oder None, Name). Kurse bekommen einen eigenen Reiter,
@@ -48,7 +51,11 @@ _ART_NAME = {
 REITER = (("debugger_pr", "technik", "debugger", "Debugger-PRs"),
           ("selbstbild_rueckfrage", "technik", "rueckfragen", "Rückfragen"),
           ("kursfreigabe", "kurse", None, "Kursfreigaben"),
-          ("marketing_video", "marketing", "video", "Videos"))
+          ("marketing_video", "marketing", "video", "Videos"),
+          ("post_anweisung", "nachrichten", "anweisung", "Mails mit Anweisung an eine KI"))
+# Arten, die nur der Besitzer der Post sieht und entscheidet (Ein Container = ein Nutzer):
+# der Unter-Reiter fehlt fuer alle anderen, die Route weist sie ab.
+NUR_BESITZER = ("post_anweisung",)
 _ZIEL = {art: (reiter, unter) for art, reiter, unter, _ in REITER}
 _LABEL_KNOEPFE = (("antwort:weg", "kann weg"), ("antwort:bleibt", "soll bleiben"),
                   ("antwort:benutzt", "wird benutzt"))
@@ -63,6 +70,12 @@ _HINWEISE = {
     "neu_gebaut": ("warnung", "Das Video wird gerade neu gebaut – bitte die neue Fassung freigeben."),
     "buch": ("warnung", "Das Auftragsbuch ist gerade nicht erreichbar. Nichts wurde getan."),
     "quelle": ("warnung", "Die Quelle des Eintrags ist nicht lesbar. Nichts wurde getan."),
+    "anweisung_freigegeben": ("hinweis", "Die Mail ist für den Agenten freigegeben."),
+    "anweisung_gesperrt": ("hinweis", "Die Mail bleibt für den Agenten gesperrt."),
+    "anweisung_veraltet": ("warnung", "Diese Mail wartet nicht mehr auf eine Entscheidung. "
+                                      "Nichts wurde geändert."),
+    "nicht_besitzer": ("warnung", "Über diese Mail entscheidet nur der Besitzer der Post. "
+                                  "Nichts wurde geändert."),
 }
 
 try:
@@ -113,6 +126,19 @@ def rowboat_vermerk(draft_id) -> str:
             f'<div class="meta">Rowboat: {rowboat_text(z[0]["rowboat_stand"])}</div>')
 
 
+def besitzer_ist(ui, name=None) -> bool:
+    """Ist der angemeldete (oder genannte) Benutzer der Besitzer der Post dieses Containers?"""
+    return post_struktur.mail_verlauf_erlaubt(ui._AKTIVER_BENUTZER.get() if name is None else name)
+
+
+def sichtbar(ui, art: str) -> bool:
+    """Steht der Unter-Reiter dieser Art auf /freigaben? Arten aus NUR_BESITZER nur fuer
+    den Besitzer der Post mit einer Rolle, die entscheiden darf."""
+    if art not in NUR_BESITZER:
+        return True
+    return ui._AKTIVE_ROLLE.get() not in ("lesen", "kalender") and besitzer_ist(ui)
+
+
 def _hinweis(ui, request) -> str:
     code = request.query_params.get("eg_hinweis") if request is not None else None
     if code in _HINWEISE:
@@ -130,6 +156,14 @@ def _knopf(ui, aktion: str, kennung: str, text: str, klasse: str = "", **extra) 
             f'{felder}<button class="{klasse}">{text}</button></form>')
 
 
+def _entscheid_knopf(ui, kennung: str, entscheid: str, text: str, klasse: str = "") -> str:
+    return (f'<form class="aktion {klasse}" method="post" action="/freigaben/post-anweisung">'
+            f'<input type="hidden" name="kennung" value="{ui._e(kennung)}">'
+            f'<input type="hidden" name="entscheid" value="{ui._e(entscheid)}">'
+            f'<input type="hidden" name="csrf" value="{ui.CSRF_TOKEN}">'
+            f'<button class="{klasse}">{text}</button></form>')
+
+
 def _karte(ui, e: dict, auftrag: dict | None, darf: bool) -> str:
     e_ = ui._e
     kennung = e["kennung"]
@@ -140,13 +174,17 @@ def _karte(ui, e: dict, auftrag: dict | None, darf: bool) -> str:
              f'<div><b>{e_(herkunft)}</b> · {e_(e["titel"])}</div>']
     if e.get("link"):
         text = ("auf GitHub ansehen" if art == "debugger_pr"
-                else "Ansehen und herunterladen" if art == "marketing_video" else "Ansehen")
+                else "Ansehen und herunterladen" if art == "marketing_video"
+                else "Mail ansehen" if art == "post_anweisung" else "Ansehen")
         teile.append(f'<div><a href="{e_(e["link"])}" target="_blank" rel="noopener">{text}</a></div>')
     if art == "debugger_pr" and details.get("tests") not in (None, ""):
         teile.append(f'<div class="meta">Teststand: {e_(str(details["tests"])[:200])}</div>')
     if art == "marketing_video":
         teile.append('<div class="meta">mit KI erstellt</div>')
-    teile.append(f'<div class="meta">Rowboat: {rowboat_text(e["rowboat_stand"])}</div>')
+    if art in fe.NICHT_NACH_ROWBOAT:
+        teile.append('<div class="meta">Bleibt hier, geht nicht nach Rowboat.</div>')
+    else:
+        teile.append(f'<div class="meta">Rowboat: {rowboat_text(e["rowboat_stand"])}</div>')
     if e.get("vermerk"):
         teile.append(f'<div class="meta">{e_(e["vermerk"])}</div>')
     wartet = bool(auftrag and auftrag["status"] in ("offen", "laeuft"))
@@ -154,6 +192,16 @@ def _karte(ui, e: dict, auftrag: dict | None, darf: bool) -> str:
         teile.append(f'<div class="fehler">fehlgeschlagen: {e_(auftrag["fehler"] or "ohne Angabe")}</div>')
     if wartet:
         teile.append('<div class="meta">wartet auf PC</div>')
+    elif art == "post_anweisung":
+        # Nur zwei Entscheidungen, kein "verwerfen": ein verworfener Eintrag kaeme mit der
+        # naechsten Runde wieder, solange die Mail unentschieden ist.
+        if darf and besitzer_ist(ui):
+            teile.append(f'<div class="aktionen">'
+                         f'{_entscheid_knopf(ui, kennung, "freigegeben", "Für den Agenten freigeben")}'
+                         f'{_entscheid_knopf(ui, kennung, "gesperrt", "Gesperrt lassen", "gefahr")}'
+                         f'</div>')
+        else:
+            teile.append('<div class="meta">Entscheiden kann nur der Besitzer der Post.</div>')
     elif darf:
         knoepfe = []
         if art == "selbstbild_rueckfrage":
@@ -310,8 +358,31 @@ def routen(ui) -> list:
         e = offener(kennung)
         if e is not None and e["art"] == "entwurf":  # Entwuerfe nur ueber ihre Entwurfskarte
             return ziel("abgewiesen")
+        if e is not None and e["art"] == "post_anweisung":  # nur freigeben oder gesperrt lassen
+            return ziel("abgewiesen", e["art"])
         ok = fe.schliessen_kennung(kennung, "verworfen", ui._ui_akteur(request))
         return ziel("verworfen" if ok else "geschlossen", e["art"] if e else None)
+
+    @ui._gesichert_seite
+    async def anweisung(request):
+        """Post-Assistent 3a: der Besitzer gibt eine markierte Mail fuer den Agenten frei
+        oder laesst sie gesperrt. Jeder andere aendert nichts."""
+        form, fehler = await formular(request)
+        if fehler is not None:
+            return fehler
+        entscheid = str(form.get("entscheid") or "")
+        if entscheid not in post_anweisung.ENTSCHEIDE:
+            return ui._fehlerseite(422, "Abgewiesen", "Unbekannte Entscheidung. Nichts wurde getan.")
+        e = offener(str(form.get("kennung") or ""))
+        if e is None:
+            return ziel("anweisung_veraltet", "post_anweisung")
+        if e["art"] != "post_anweisung":
+            return ziel("abgewiesen", e["art"])
+        von = ui._ui_akteur(request)
+        if not besitzer_ist(ui, von):
+            return ziel("nicht_besitzer", "post_anweisung")
+        ok = post_anweisung.entscheiden(str(e["quelle_ref"]), entscheid, von)
+        return ziel(f"anweisung_{entscheid}" if ok else "anweisung_veraltet", "post_anweisung")
 
     @ui._gesichert_seite
     async def stufe2(request):
@@ -325,4 +396,5 @@ def routen(ui) -> list:
             Route("/aktion/eingang-kurs", kurs, methods=["POST"]),
             Route("/aktion/eingang-video-freigeben", video_freigeben, methods=["POST"]),
             Route("/aktion/eingang-verwerfen", verwerfen, methods=["POST"]),
-            Route("/aktion/eingang-stufe2", stufe2, methods=["POST"])]
+            Route("/aktion/eingang-stufe2", stufe2, methods=["POST"]),
+            Route("/freigaben/post-anweisung", anweisung, methods=["POST"])]

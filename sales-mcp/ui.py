@@ -4083,6 +4083,8 @@ async def inbox(request):
     eingang = ui_freigabe_eingang.zaehlen()
     if eingang is not None:
         for art, wo, unter_art, titel in ui_freigabe_eingang.REITER:
+            if not ui_freigabe_eingang.sichtbar(modul, art):
+                continue  # Mails mit Anweisung an eine KI: nur der Besitzer der Post
             async def zeigen(art=art, titel=titel, wo=wo):
                 return await ui_freigabe_eingang.abschnitt(
                     modul, request, arten=(art,), titel=titel, stufe2=(wo == "technik"))

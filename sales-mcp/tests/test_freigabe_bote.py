@@ -441,3 +441,22 @@ def test_inzwischen_angenommen_kein_doppel(rowboat, monkeypatch):
     fb.durchgang()
     assert _db(k)["rowboat_stand"] == "angenommen"
     assert rowboat.suggestions == []
+
+
+def test_bote_spiegelt_post_anweisung_nicht(rowboat):
+    """3a: Eintraege "Anweisung an eine KI" bleiben auf /freigaben, nie in Rowboat."""
+    mail_id = "11111111-2222-3333-4444-666666666666"
+    k_post, _ = fe.eintragen("post", "post_anweisung", mail_id,
+                             "Mail mit Anweisung an eine KI – bitte prüfen",
+                             f"/post/mail/{mail_id}", {})
+    k = _neuer_eintrag()
+    assert fb.durchgang() == 0
+    assert len(rowboat.suggestions) == 1 and kennung_ok(rowboat.suggestions[0], k)
+    # Geschlossen und noch einmal: auch Aufraeumen fasst den Post-Eintrag nicht an.
+    fe.schliessen("post", mail_id, "erledigt", "test")
+    assert fb.durchgang() == 0
+    gesendet = repr(rowboat.aufrufe)
+    assert k_post not in gesendet and mail_id not in gesendet
+    assert "Anweisung" not in gesendet
+    assert _db(k_post)["rowboat_stand"] == "ungesichtet"
+    assert _db(k_post)["rowboat_aufgeraeumt"] is False

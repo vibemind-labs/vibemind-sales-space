@@ -218,8 +218,9 @@ def durchgang() -> int:
         # Der Name erscheint auf /freigaben, darum ohne ASCII-Umschreibung (test_darstellung).
         entwurf_fehler = f"Entwurfsspiegel.{type(e).__name__}"
     try:
-        eintraege = fe.offene()
-        aufraeumen = fe.zum_aufraeumen()
+        # Private Post (post_anweisung) bleibt auf /freigaben: nie vorschlagen, nie aufraeumen.
+        eintraege = [e for e in fe.offene() if e["art"] not in fe.NICHT_NACH_ROWBOAT]
+        aufraeumen = [e for e in fe.zum_aufraeumen() if e["art"] not in fe.NICHT_NACH_ROWBOAT]
         stand = _stand_lesen()
         plan = planen(eintraege, aufraeumen, stand, basis)
         staende = dict(plan.staende)

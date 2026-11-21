@@ -51,6 +51,7 @@ import socket
 import sys
 import threading
 
+import post_anweisung
 import post_einordnung
 import post_erledigt
 import post_herkunft
@@ -713,9 +714,20 @@ def eine_runde() -> dict:
     if _STOPP.is_set():
         return bilanz
     _einordnen(bilanz)
+    _anweisungen_nachziehen(bilanz)
     if not _STOPP.is_set():
         _aufraeumen(bilanz)
     return bilanz
+
+
+def _anweisungen_nachziehen(bilanz: dict) -> None:
+    """3a: markierte Mails auf /freigaben stellen bzw. erledigte dort schliessen. Ruft
+    kein Modell, laeuft also auch in der Kundenpause; ein Fehler kostet die Runde nicht,
+    im Protokoll nur der Typ."""
+    try:
+        bilanz["anweisung_eintraege"] = post_anweisung.eintraege_nachziehen()
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("Anweisungs-Eintraege nicht nachgezogen (%s)", type(e).__name__)
 
 
 def _einordnen(bilanz: dict) -> None:
