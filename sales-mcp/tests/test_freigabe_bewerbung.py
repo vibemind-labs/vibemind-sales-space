@@ -3845,3 +3845,51 @@ def test_bw_karte_fremd_oder_boese_oeffnet_nichts(client, falsch, wert):
     s = _abschnitt(client, "/freigaben?bw_karte=" + urllib.parse.quote(wert))
     assert " open><summary>" not in s
     assert BOESE not in s and "onerror=1" not in s
+
+
+PRUEF = {"letzte": "weg", "code": "410", "geprueft_am": "2026-10-30T07:00:00+00:00",
+         "offline": False, "naechste_ab": "2026-10-30T13:00:00+00:00"}
+
+
+def test_rote_zeile_wenn_anzeige_offline():
+    assert ui_freigabe_bewerbung._kurzstand(ui, karte(anzeige=dict(PRUEF, offline=True)), False) == (
+        "warn", "Anzeige offline")
+    assert ui_freigabe_bewerbung._portal_kurzstand(ui, dict(pkarte(), anzeige=dict(PRUEF, offline=True))) == (
+        "warn", "Anzeige offline")
+
+
+def test_portal_wieder_online_ist_neutral():
+    k = dict(pkarte(), anzeige=dict(PRUEF, letzte="online", code="200"))
+    assert ui_freigabe_bewerbung._portal_kurzstand(ui, k) == ("", "bereit")
+
+
+@pytest.mark.parametrize(("pruef", "text"), [
+    (dict(PRUEF, offline=True), '<div class="warnung">Anzeige offline (410)</div>'),
+    (PRUEF, '<p class="meta">Anzeige meldet 410 – zweite Prüfung ab 14:00 (30.10.)</p>'),
+    (dict(PRUEF, letzte="online", code="200"), '<p class="meta">Anzeige online (geprüft 08:00 (30.10.))</p>'),
+    (dict(PRUEF, letzte=None, code=None), '<p class="meta">Anzeige ließ sich nicht prüfen (geprüft 08:00 (30.10.))</p>'),
+    (dict(PRUEF, code="<b>"), '<p class="meta">Anzeige scheint offline – zweite Prüfung ab 14:00 (30.10.)</p>'),
+    (dict(PRUEF, offline=True, code=None), '<div class="warnung">Anzeige offline</div>'),
+])
+def test_pruefzeile(pruef, text):
+    assert ui_freigabe_bewerbung._pruefzeile(ui, karte(anzeige=pruef)) == text
+
+
+def test_ohne_anzeige_feld_wie_teil_1(client, falsch):
+    s = _abschnitt(client)
+    assert "Anzeige meldet" not in s and "Anzeige online" not in s and "Anzeige offline" not in s
+
+
+def test_verlauf_zeigt_den_abbruch(client, falsch):
+    falsch.verlauf = [verlauf(entscheidung="reject", grund="anzeige_offline", anzeige_status=410,
+                              von="zentrale:anzeige", anzeige_url="https://jobs.example.org/4711")]
+    s = _abschnitt(client)
+    assert "Abgebrochen – Anzeige offline (410)" in s and "Anzeige ↗" in s
+    assert "von zentrale:anzeige" not in s
+
+
+@pytest.mark.parametrize("status", [True, "410", 9999, None])
+def test_verlauf_abbruch_ohne_gueltigen_code(client, falsch, status):
+    falsch.verlauf = [verlauf(entscheidung="reject", grund="anzeige_offline", anzeige_status=status)]
+    s = _abschnitt(client)
+    assert "Abgebrochen – Anzeige offline" in s and "Abgebrochen – Anzeige offline (" not in s

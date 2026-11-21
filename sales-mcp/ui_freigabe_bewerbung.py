@@ -829,9 +829,38 @@ def _portal_inhalt(ui, k: dict, p: dict, basis: str, nr, lauf_id: str) -> str:
     return '<p class="meta">Stand unbekannt – Seite neu laden.</p>'
 
 
+def _pruefung(k: dict) -> dict | None:
+    """Der Pruefstand der Anzeige aus der Zentrale (Teil 2): das dict oder None (fehlt, None oder kein dict)."""
+    p = k.get("anzeige")
+    return p if isinstance(p, dict) else None
+
+
+def _pruefzeile(ui, k: dict) -> str:
+    """Die Zeile zum Pruefstand der Anzeige in der aufgeklappten Karte; ohne Pruefstand "". Der erste Treffer gilt.
+    Der Code erscheint nur als genau drei ASCII-Ziffern, die Uhrzeit nur, wenn sie lesbar ist."""
+    p = _pruefung(k)
+    if p is None:
+        return ""
+    code = p.get("code")
+    code = code if isinstance(code, str) and re.fullmatch(r"[0-9]{3}", code, re.ASCII) else None
+    if p.get("offline") is True:
+        return f'<div class="warnung">Anzeige offline{f" ({code})" if code else ""}</div>'
+    if p.get("letzte") == "weg":
+        uhr = _in_ortszeit(p.get("naechste_ab"), lambda z: _uhrzeit(ui, z))
+        text = f"Anzeige meldet {code} – zweite Prüfung" if code else "Anzeige scheint offline – zweite Prüfung"
+        return f'<p class="meta">{text}{f" ab {uhr}" if uhr else ""}</p>'
+    uhr = _in_ortszeit(p.get("geprueft_am"), lambda z: _uhrzeit(ui, z))
+    teil = f" (geprüft {uhr})" if uhr else ""
+    if p.get("letzte") == "online":
+        return f'<p class="meta">Anzeige online{teil}</p>'
+    return f'<p class="meta">Anzeige ließ sich nicht prüfen{teil}</p>'
+
+
 def _kurzstand(ui, k: dict, not_aus: bool) -> tuple[str, str] | None:
     """Der kurze Stand in der zugeklappten Zeile einer Unterlagen-Karte: (Klasse, Text), Klasse "" oder "warn".
     Warnungen gehen vor neutrale Stände; ein unbekannter Autonomie-Stand zeigt nichts (None)."""
+    if (pruefung := _pruefung(k)) is not None and pruefung.get("offline") is True:
+        return "warn", "Anzeige offline"
     ue = _ueberarbeitung(k)
     a = k.get("autonom")
     stand = a.get("stand") if isinstance(a, dict) else None
@@ -862,6 +891,8 @@ def _portal_kurzstand(ui, k: dict) -> tuple[str, str] | None:
     """Der kurze Stand in der zugeklappten Zeile einer Portal-Karte (Klasse, Text); ein unbekannter Zustand: None."""
     p = k["portal"]
     zustand = p.get("zustand")
+    if (pruefung := _pruefung(k)) is not None and pruefung.get("offline") is True:
+        return "warn", "Anzeige offline"
     if zustand == "offline":
         return "warn", "Anzeige offline"
     if zustand == "unklar":
@@ -921,7 +952,8 @@ def _portal_karte(ui, k: dict, *, offen: bool = False, meldung: str = "") -> str
     if p.get("zustand") in _PORTAL_FEEDBACK_ZUSTAENDE and not inhalt.startswith('<p class="meta">Lauf unbekannt'):
         inhalt += _feedback_formular(ui, k, basis, nr, unterlagen=False)
     kopf = _kopf(ui, k, '<span class="badge">Portal</span>', _portal_kurzstand(ui, k), offen=offen)
-    return (f'{kopf}{meldung}<div class="meta">{" · ".join(angaben)}</div>{verweise}{_abweichungen(ui, k)}{inhalt}</details>')
+    return (f'{kopf}{meldung}<div class="meta">{" · ".join(angaben)}</div>{_pruefzeile(ui, k)}{verweise}'
+            f'{_abweichungen(ui, k)}{inhalt}</details>')
 
 
 def _portal_kopf(ui, karten: list[dict]) -> str:
@@ -1013,7 +1045,7 @@ def _karte(ui, k: dict, not_aus: bool = False, *, offen: bool = False, meldung: 
     kanal = _nur_text(weg.get("kanal")) or k.get("kanal")
     etikett = f'<span class="badge">{e(_label(KANAELE, kanal))}</span>' if kanal else ""
     kopf = _kopf(ui, k, etikett, _kurzstand(ui, k, not_aus), offen=offen)
-    return (f'{kopf}{meldung}<div class="meta">{" · ".join(angaben)}</div>{autonom_zeile}{luecke}'
+    return (f'{kopf}{meldung}<div class="meta">{" · ".join(angaben)}</div>{_pruefzeile(ui, k)}{autonom_zeile}{luecke}'
             f'{verweise}{pruef}{was_neu}{_abweichungen(ui, k)}{pruefnotiz}{versand}{entscheiden}{feedback}</details>')
 
 
@@ -1033,9 +1065,18 @@ def _verlauf_zeile(ui, v: dict) -> str:
     zusatz = ""
     # `ausgang` sagt die Zentrale (H4). Fehlt es ganz (aeltere Zentrale), gilt wie vor H4 der Status.
     ausgang = v.get("ausgang")
+    # Der Grund gilt vor dem Ausgang: gleich nach dem Abbruch kann der Ausgang noch "offen" lauten.
+    abbruch = v.get("grund") == "anzeige_offline"
+    status = v.get("anzeige_status")
     von_hand = ausgang == "handarbeit" or (
         ausgang in (None, "") and v.get("entscheidung") == "approve" and v.get("status") == "blockiert")
-    if ausgang == "versendet":
+    if abbruch:
+        was = "Abgebrochen – Anzeige offline"
+        if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+            was += f" ({status})"
+        if (url := _anzeige(v.get("anzeige_url"))):
+            zusatz = " · " + _link(e(url), "Anzeige ↗")
+    elif ausgang == "versendet":
         an = _nur_text(v.get("versand_an"))
         was = f"Versendet an {e(an)}" if an else "Versendet"
     elif ausgang == "unklar":
@@ -1060,7 +1101,7 @@ def _verlauf_zeile(ui, v: dict) -> str:
     else:
         was = e(ausgang)                       # ein Ausgang, den diese Seite nicht kennt: wie geliefert
     teile = [f"Fassung {nr if nr else '?'}", was]
-    if v.get("von"):
+    if v.get("von") and not abbruch:
         teile.append(f"von {e(v.get('von'))}")
     teile.append(f"vor {e(_vor(v.get('am')))}")
     return (f'<div class="karte"><b>{e(v.get("firma"))} – {e(v.get("rolle"))}</b> '
