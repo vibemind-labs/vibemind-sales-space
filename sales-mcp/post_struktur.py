@@ -241,20 +241,37 @@ def sichtbar_sql(b: Betrachter) -> tuple[str, list]:
     return ("(m.besitzer = %s)", [b.name])
 
 
-def _spalten(mit_vorschlaegen: bool = False) -> str:
+# 3a: Den Inhalt einer Mail liest der Agent nur, wenn sie geprueft ist und
+# keine Anweisung an eine KI enthaelt - oder der Besitzer sie freigegeben hat.
+AGENT_LESBAR_SQL = "(m.geprueft_am is not null and (m.enthaelt_anweisung is false or m.anweisung_entscheid = 'freigegeben'))"
+
+
+def _spalten(mit_vorschlaegen: bool = False, agent: bool = False) -> str:
     # Text, Auszug, Anhaenge und Empfaenger sensibler Mails werden schon in
     # SQL geleert: sie verlassen die Datenbank gar nicht erst (Spec §5: nur
     # Konto, Absender, Datum, Betreff, Fach, Markierung), auch nicht fuer den
     # Besitzer. `is not false` behandelt NULL wie sensibel (fail closed).
     s = "m.sensibel is not false"
+    if agent:
+        # Fuer den Agenten zusaetzlich alles, was nicht lesbar ist (3a): nur
+        # Kopf. `is not true` statt `not`, damit ein SQL-NULL in der Pruefung
+        # (geprueft, aber ohne Ergebnis) den Text nicht durchlaesst.
+        lesbar = f"({AGENT_LESBAR_SQL}) is true"
+        s = f"({s} or ({AGENT_LESBAR_SQL}) is not true)"
+        hinweis = (f", case when {lesbar} then null "
+                   "when m.enthaelt_anweisung is true then 'anweisung' "
+                   "else 'nicht_geprueft' end as agent_hinweis")
+    else:
+        hinweis = ""
     return ("m.id, m.konto_id, m.besitzer, m.von, m.betreff, m.datum, "
             "m.bereich, m.fach, m.unterfach, m.sensibel, m.status, m.gesehen_am, "
-            "m.ziel, m.ordner, m.ordner_am, "
+            "m.ziel, m.ordner, m.ordner_am, m.dringlichkeit, m.enthaelt_anweisung, "
             f"case when {s} then false else m.kalenderteil end as kalenderteil, "
             f"case when {s} then null else m.an end as an, "
             f"case when {s} then '{{}}'::text[] else m.anhaenge end as anhaenge, "
             f"case when {s} then null else m.auszug end as auszug, "
             f"case when {s} then null else m.text end as text"
+            + hinweis
             + (", " + _vorschlaege_spalte(s) if mit_vorschlaegen else ""))
 
 
@@ -286,7 +303,12 @@ def ziel_sql(ziel: str) -> str:
 
 def mails_suchen(b: Betrachter, suche: str = "", bereich: str = "",
                  fach: str = "", konto_id: str = "", grenze: int = 50,
-                 versatz: int = 0, unterfach: str = "", ziel: str = "") -> list[dict]:
+                 versatz: int = 0, unterfach: str = "", ziel: str = "",
+                 nach_dringlichkeit: bool = False) -> list[dict]:
+    """Mails, die `b` sehen darf, neueste zuerst. `nach_dringlichkeit`
+    sortiert erst nach Dringlichkeit: sofort, heute, dann kann_warten und
+    ungepruefte gemeinsam (der Altbestand rutscht nicht nach unten), zuletzt
+    nichts; innerhalb eines Rangs nach Datum."""
     import server
     if ziel and ziel not in ZIEL_ANSICHTEN:
         return []
@@ -325,16 +347,20 @@ def mails_suchen(b: Betrachter, suche: str = "", bereich: str = "",
         teile.append("m.suchtext @@ websearch_to_tsquery('german', %s)")
         params.append(suche)
     params += [max(1, min(int(grenze), 200)), max(0, int(versatz))]
+    rang = ("case m.dringlichkeit when 'sofort' then 0 when 'heute' then 1 "
+            "when 'nichts' then 3 else 2 end, " if nach_dringlichkeit else "")
     return server._q(
-        f"select {_spalten()} from post_mails m where "
+        f"select {_spalten(agent=b.ist_agent)} from post_mails m where "
         + " and ".join(teile)
-        + " order by m.datum desc nulls last, m.gesehen_am desc "
+        + f" order by {rang}m.datum desc nulls last, m.gesehen_am desc "
           "limit %s offset %s", params)
 
 
 def mail_lesen(b: Betrachter, mail_id: str) -> "dict | None":
     """Eine Mail, wenn `b` sie sehen darf; sonst None (auch bei unbekannter
-    oder kaputter id - kein Unterschied, damit nichts durchsickert)."""
+    oder kaputter id - kein Unterschied, damit nichts durchsickert). Der
+    Agent bekommt ungepruefte oder markierte Mails nur als Kopf mit
+    `agent_hinweis` (3a)."""
     import server
     try:
         mid = str(uuid.UUID(str(mail_id)))
@@ -342,7 +368,8 @@ def mail_lesen(b: Betrachter, mail_id: str) -> "dict | None":
         return None
     where, params = sichtbar_sql(b)
     zeilen = server._q(
-        f"select {_spalten(mit_vorschlaegen=True)} from post_mails m "
+        f"select {_spalten(mit_vorschlaegen=True, agent=b.ist_agent)} "
+        "from post_mails m "
         f"where m.id = %s and {where}",
         [mid] + params)
     return zeilen[0] if zeilen else None
