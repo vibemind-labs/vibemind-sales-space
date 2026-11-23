@@ -153,8 +153,11 @@ im Auftragsbuch kein Auftrag an Sales entstehen kann.
    Transaktion mit `ROLLBACK` gegen die echte Datenbank laufen lassen (legt nichts an) und danach im
    Testschema mit einem angelegten Probe-Auftrag durchspielen: übernehmen, abschließen, zweites Übernehmen
    liefert nichts.
-2. **Migration einspielen:** `db/auftrag-empfang.sql`. Rein additiv, drei neue Funktionen.
-   Rückweg: `DROP FUNCTION auftrag.sales_empfang_naechster(text, interval)`, ebenso die beiden anderen.
+2. **Migration einspielen:** `101_auftragsbuch_empfang.sql` aus vibemind-os, **nicht** `db/auftrag-empfang.sql`.
+   101 enthält dieselben drei Hüllen mit denselben Signaturen und Bedingungen. Sie ist aber nicht rein additiv:
+   Sie ersetzt `_vergeben` und `brain_lesen` und legt die Hüllen und die Rolle für Rowboat an. Rückweg und
+   Reihenfolge stehen dort. Die Datei hier nach 101 einzuspielen ersetzt nur die drei Sales-Hüllen durch
+   gleichwertige Fassungen; nötig ist das nicht.
 3. **Abbild neu bauen** (`jsonschema` ist als Abhängigkeit dazugekommen) und den Dienst eintragen. Der
    Eintrag für `docker-compose.yml`, nach dem Muster von `auftrag-bote`:
 
@@ -185,12 +188,15 @@ im Auftragsbuch kein Auftrag an Sales entstehen kann.
    Namentlich starten, nie mit einem blanken `docker compose up -d`. Rückweg: Dienst stoppen und entfernen.
 4. **Start prüfen:** Die erste Protokollzeile nennt Schema, Laden, freigeschaltete Arten und je Art die
    ersten acht Zeichen der Prüfsumme. Diese Prüfsumme mit dem Stand in vibemind-os vergleichen.
+   Der Laden muss auf beiden Seiten gleich sein: `LADEN_PRAEFIX` hier und `AUFTRAGSBUCH_LADEN` beim Gehirn.
+   Weicht er ab, holt der Abholer nichts ab, und der Auftrag läuft still ab. Keine Seite prüft das selbst.
 5. **Freischalten im Auftragsbuch** (Schritt der VibeMind-Seite, nicht dieses Repos): eine Zeile in
    `auftrag.brain_arten` für `('sales', 'kontakt_finden', 1)`, dazu die Art im Vertrag und im Verzeichnis
    von vibemind-os. Erst danach kann das Gehirn einen Auftrag an Sales anlegen.
    Rückweg: die Zeile wieder löschen.
 6. **Probe:** einen Auftrag `kontakt_finden` über das Gehirn anlegen und im Auftragsbuch nachlesen:
-   `fertig`, Ergebnis in der Form, keine Adresse und keine Nummer.
+   `fertig`, Ergebnis in der Form, keine Adresse und keine Nummer. Bleibt der Auftrag `offen`, zuerst den
+   Laden auf beiden Seiten vergleichen (Schritt 4).
 7. **Gegenproben, je einmal echt:** Abholer gestoppt (Auftrag wird nach der Frist `abgelaufen`),
    unbekannte Version (wird `fehler` mit Grund), gesperrte Art (wird `fehler` mit Grund).
 
