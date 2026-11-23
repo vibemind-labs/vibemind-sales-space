@@ -3,19 +3,17 @@ import pytest
 
 import auftrag_vertrag as av
 
-# Pruefsummen im Vertrag von vibemind-os (spaces/_contract/sales.contract.yaml, Stand origin/master
-# 23.11.2026). Aendert sich eine hier, ist die Kopie nicht mehr woertlich.
+# Pruefsummen im Vertrag von vibemind-os (spaces/_contract/sales.contract.yaml). post_pruefen und
+# kontakt_finden: origin/master 23.11.2026. Die drei Zaehlarten: Zweig cc/sales-zaehlarten, b8d08837
+# (dort in tests/test_zaehlarten.py dieselben Werte). Aendert sich eine hier, ist die Kopie nicht woertlich.
 PRUEFSUMMEN = {
     ("post_pruefen", 2): "33235cd08d2f890411d79c746073caaa735f47bfbec8bc4a44f8275be44e24f7",
     ("kontakt_finden", 1): "861ecd0af8279ca2c5164e005d07bee24fa38e315dcab1b5b3d26051f32a43b8",
-}
-# Vorschlag fuer den Vertrag, dort noch nicht eingetragen. Wandert nach PRUEFSUMMEN, sobald er drin steht.
-VORSCHLAG = {
-    ("termine_heute", 1): "badeaa3eada323bdf0086ce88d86b0209b8e8e03e0be6154188e97828a9eaa2e",
+    ("termine_heute", 1): "35aa4fb717ca0af4a1acffd9e134ce0cb96d4f25b26cfee5688599efda89d751",
     ("freigaben_zaehlen", 1): "74c669057e253527c633f03a2ed4c7d03010c7819a9e1f39fab9687a7998b98e",
-    ("post_offen", 1): "90430f4e8be3989f2d4d3ec82518a5437f41601d37631d4139c6042a5a392771",
+    ("post_offen", 1): "9fbf2a71ec72649208efed8e842c893e7055f0bb74c63f97e2b634186c591a3f",
 }
-ZAEHLARTEN = {art for art, _ in VORSCHLAG}
+ZAEHLARTEN = {"termine_heute", "freigaben_zaehlen", "post_offen"}
 KID = "0123abcd-0000-4000-8000-000000000001"
 
 
@@ -32,8 +30,8 @@ def test_alle_arten_geladen(arten):
     assert arten["post_pruefen"].veraendert is True
 
 
-def test_jede_art_ist_woertlich_der_vertrag_von_vibemind_oder_der_vorschlag(arten):
-    assert {(a.art, a.version): av.art_hash(a) for a in arten.values()} == PRUEFSUMMEN | VORSCHLAG
+def test_jede_art_ist_woertlich_der_vertrag_von_vibemind(arten):
+    assert {(a.art, a.version): av.art_hash(a) for a in arten.values()} == PRUEFSUMMEN
 
 
 @pytest.mark.parametrize("art, felder", [
