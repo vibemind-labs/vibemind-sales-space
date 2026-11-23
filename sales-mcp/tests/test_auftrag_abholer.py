@@ -125,7 +125,9 @@ def test_langer_name_wird_gekuerzt_statt_abgelehnt():
     (auftrag(art="gibt_es_nicht"), ab.GRUND_UNBEKANNT),
     (auftrag(version=2), ab.GRUND_UNBEKANNT),
     (auftrag(version=None), ab.GRUND_UNBEKANNT),
-    (auftrag(art="post_pruefen", eingabe={"zeitraum": "heute", "entwuerfe_anlegen": False}), ab.GRUND_GESPERRT),
+    (auftrag(art="post_pruefen", version=1, eingabe={"zeitraum": "heute", "entwuerfe_anlegen": False}),
+     ab.GRUND_UNBEKANNT),                                   # Version 1 gilt nicht mehr
+    (auftrag(art="post_pruefen", version=2, eingabe={"zeitraum": "heute", "entwuerfe_anlegen": False}), ab.GRUND_GESPERRT),
     (auftrag(eingabe={"suche": "x"}), ab.GRUND_EINGABE),
     (auftrag(eingabe={"suche": "Muster", "mehr": 1}), ab.GRUND_EINGABE),
 ])
@@ -147,14 +149,14 @@ def test_freigeschaltet_ist_ohne_umgebung_nur_kontakt_finden(monkeypatch):
 
 
 def test_freigeschaltete_art_ohne_ausfuehrer_wird_abgelehnt():
-    a = auftrag(art="post_pruefen", eingabe={"zeitraum": "heute", "entwuerfe_anlegen": False})
+    a = auftrag(art="post_pruefen", version=2, eingabe={"zeitraum": "heute", "entwuerfe_anlegen": False})
     buch = Buch(a)
     assert lauf(buch, frei={"post_pruefen"}, testkontakt=K3) == {"fertig": 0, "fehler": 1}
     assert buch.fehler[AID].startswith(ab.GRUND_NICHT_GEBAUT)
 
 
 def test_veraendernde_art_ohne_testkontakt_wird_abgelehnt():
-    a = auftrag(art="post_pruefen", eingabe={"zeitraum": "heute", "entwuerfe_anlegen": True})
+    a = auftrag(art="post_pruefen", version=2, eingabe={"zeitraum": "heute", "entwuerfe_anlegen": True})
     buch = Buch(a)
     assert lauf(buch, frei={"post_pruefen"}, testkontakt="") == {"fertig": 0, "fehler": 1}
     assert buch.fehler[AID].startswith(ab.GRUND_KEIN_TESTKONTAKT)

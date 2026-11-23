@@ -33,13 +33,15 @@ fester Form zurück. Bisher war Sales im Auftragsbuch nur Absender (`auftrag_buc
 | Art | Version | verändert | freigeschaltet | ausführbar |
 |---|---|---|---|---|
 | `kontakt_finden` | 1 | nein | ja (Vorgabe) | ja, ohne Sprachmodell |
-| `post_pruefen` | 1 | ja | nein | nein, wird mit Grund abgelehnt |
+| `post_pruefen` | 2 | ja | nein | nein, wird mit Grund abgelehnt |
 
 `kontakt_finden` sucht nur im Namen und liest nur Kennung, Name und Firma. Adresse und Nummer verlassen die
 Datenbank nicht. Private, archivierte und zur Löschung vermerkte Kontakte werden nicht gemeldet.
 
-`post_pruefen` ist wörtlich die Form aus dem Vertrag von vibemind-os; ein Test hält die Prüfsumme fest.
-Vor dem Freischalten braucht die Form eine Version 2: `link` und `entwurf_id` haben dort noch kein Muster.
+Beide Arten sind wörtlich die Formen aus dem Vertrag von vibemind-os (`spaces/_contract/sales.contract.yaml`);
+ein Test hält beide Prüfsummen fest. `post_pruefen` steht auf Version 2: `link` ist ein Pfad ab `/`, beginnt
+nicht mit `//` und enthält kein Leerzeichen; `entwurf_id` ist `^[A-Za-z0-9_-]{1,64}$` oder leer. Ein Auftrag
+mit Version 1 wird als unbekannte Version abgelehnt.
 
 ## Die Kennung im Gateway
 
@@ -167,6 +169,6 @@ Ablehnung abbrechen). Dieses Skript gibt es noch nicht.
   steht die Startprüfung (Abschnitt „Betrieb").
 - Herzschlag und Überwachung des Abholers (`deploy/smoke.sh`, `deploy/wache.sh`) fehlen.
 - Der lesende Zugang für die Nachprüfung `beleg` fehlt.
-- `post_pruefen` Version 2 mit Mustern für `link` und `entwurf_id`, danach der Ausführer.
+- Der Ausführer für `post_pruefen` (Version 2 der Form ist da).
 - Die Freischaltung von `kontakt_finden` wartet auf zwei Dinge im Gehirn: die Sperre für Agenten, die
   heute alle Werkzeug-Server sehen, und die Herkunftsregel samt Ergebnistext ohne Personendaten.

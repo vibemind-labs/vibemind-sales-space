@@ -1,8 +1,8 @@
 # Auftragsarten, die Sales als EMPFAENGER im Auftragsbuch annimmt (an = sales, von = brain).
 #
 # Dieselbe Form wie der Abschnitt `auftragsarten` im Vertrag von vibemind-os
-# (spaces/_contract/sales.contract.yaml). post_pruefen ist von dort woertlich uebernommen;
-# tests/test_auftrag_vertrag.py haelt die Pruefsumme fest. Wer hier eine Form aendert, zaehlt
+# (spaces/_contract/sales.contract.yaml). Beide Arten sind von dort woertlich uebernommen;
+# tests/test_auftrag_vertrag.py haelt die Pruefsummen fest. Wer hier eine Form aendert, zaehlt
 # `version` hoch und zieht den Vertrag in vibemind-os nach.
 #
 # Was hier steht, ist bekannt, aber nicht freigeschaltet: Welche Arten der Abholer ausfuehrt,
@@ -13,7 +13,7 @@
 
 auftragsarten:
   - art: post_pruefen
-    version: 1
+    version: 2
     veraendert: true
     frist_min: 15
     nachpruefung: beleg
@@ -57,8 +57,12 @@ auftragsarten:
               link:
                 type: string
                 maxLength: 500
+                pattern: '^/(?!/)[^\s]*$'
+                not:
+                  pattern: '\s'
               entwurf_id:
                 type: [string, "null"]
+                pattern: "^[A-Za-z0-9_-]{1,64}$"
         anzahl_gelesen:
           type: integer
           minimum: 0

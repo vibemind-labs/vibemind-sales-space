@@ -3,9 +3,12 @@ import pytest
 
 import auftrag_vertrag as av
 
-# Pruefsumme der Art post_pruefen v1 im Vertrag von vibemind-os (spaces/_contract/sales.contract.yaml).
-# Aendert sie sich hier, ist die Kopie nicht mehr woertlich.
-POST_PRUEFEN_V1 = "75fb9ae6496d8cde21531cda7109ce4e647ca298a24e7959f43be57467b54189"
+# Pruefsummen im Vertrag von vibemind-os (spaces/_contract/sales.contract.yaml, Stand origin/master
+# 23.11.2026). Aendert sich eine hier, ist die Kopie nicht mehr woertlich.
+PRUEFSUMMEN = {
+    ("post_pruefen", 2): "33235cd08d2f890411d79c746073caaa735f47bfbec8bc4a44f8275be44e24f7",
+    ("kontakt_finden", 1): "861ecd0af8279ca2c5164e005d07bee24fa38e315dcab1b5b3d26051f32a43b8",
+}
 KID = "0123abcd-0000-4000-8000-000000000001"
 
 
@@ -21,8 +24,21 @@ def test_beide_arten_geladen(arten):
     assert arten["post_pruefen"].veraendert is True
 
 
-def test_post_pruefen_ist_woertlich_der_vertrag_von_vibemind(arten):
-    assert av.art_hash(arten["post_pruefen"]) == POST_PRUEFEN_V1
+def test_jede_art_ist_woertlich_der_vertrag_von_vibemind(arten):
+    assert {(a.art, a.version): av.art_hash(a) for a in arten.values()} == PRUEFSUMMEN
+
+
+def test_ergebnis_post_pruefen_v2_nur_pfade_und_saubere_kennungen(arten):
+    a = arten["post_pruefen"]
+    punkt = {"punkt_id": "0123456789abcdef", "titel": "Rückfrage", "frist": None,
+             "link": "/post/aufraeumen#p1", "entwurf_id": "e_42-a"}
+    av.pruefe_ergebnis(a, {"faellig": [punkt], "anzahl_gelesen": 3, "kontakte_neu": 0})
+    av.pruefe_ergebnis(a, {"faellig": [{**punkt, "entwurf_id": None}], "anzahl_gelesen": 0, "kontakte_neu": 0})
+    for falsch in ({"link": "https://anderswo.example/x"}, {"link": "//anderswo.example/x"},
+                   {"link": "/mit leerzeichen"}, {"link": "/zeile\n"}, {"link": "relativ"},
+                   {"entwurf_id": "a/b"}, {"entwurf_id": ""}, {"entwurf_id": "x" * 65}):
+        with pytest.raises(av.FormFehler):
+            av.pruefe_ergebnis(a, {"faellig": [{**punkt, **falsch}], "anzahl_gelesen": 0, "kontakte_neu": 0})
 
 
 def test_eingabe_kontakt_finden(arten):
