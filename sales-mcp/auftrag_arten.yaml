@@ -123,10 +123,10 @@ auftragsarten:
     frist_min: 5
     nachpruefung: form
     beschreibung: >-
-      Sales zählt die Termine, die heute noch anstehen, in allen Kalendern,
-      dazu die Kundentermine von heute laut Kundenakte und die Kalender, die
-      gerade nicht antworten. Es wird nichts verändert. Gemeldet werden nur
-      Zahlen, nie Titel, Namen oder Orte.
+      Sales zählt die Termine von heute so, wie sie die Tagesansicht des
+      Kalenders dem Ladenbesitzer zeigt, dazu die Kundentermine von heute wie
+      auf der Startseite und die Kalender, die gerade nicht antworten. Es wird
+      nichts verändert. Gemeldet werden nur Zahlen, nie Titel, Namen oder Orte.
     eingabe:
       type: object
       additionalProperties: false
@@ -183,8 +183,9 @@ auftragsarten:
     nachpruefung: form
     beschreibung: >-
       Sales zählt unbeantwortete Kundennachrichten in den Chat-Kanälen und
-      Mails, die noch nicht erledigt sind. Es wird nichts verändert und nichts
-      abgeholt. Gemeldet werden nur Zahlen, nie Absender, Betreffs oder Texte.
+      Mails, die noch nicht erledigt sind, so wie sie der Ladenbesitzer in der
+      Oberfläche sieht. Es wird nichts verändert und nichts abgeholt. Gemeldet
+      werden nur Zahlen, nie Absender, Betreffs oder Texte.
     eingabe:
       type: object
       additionalProperties: false

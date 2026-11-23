@@ -102,14 +102,26 @@ def kontakt_finden(q, eingabe: dict, verborgen) -> dict:
     return {"treffer": treffer, "anzahl": len(treffer)}
 
 
-# Anbindung der Zaehlarten an sales-mcp, gesetzt in main() (anbinden). Nur lesende Wege:
-#   "kalender"            () -> (eintraege, luecken)   server.belegungen(tage_voraus=1)
-#   "chats_unbeantwortet" () -> int                    server.posteingang: anzahl_unbeantwortet
-#   "mails_offen_sql"     () -> str                    post_erledigt.offen_sql()
+# Anbindung der Zaehlarten an sales-mcp, gesetzt in main() (anbinden). Regel: Die Zahl muss die sein,
+# die der Ladenbesitzer auf der zugehoerigen Seite sieht. Deshalb rufen die Zaehlarten dieselben
+# Funktionen wie die Seiten, mit dem Ladenbesitzer als Betrachter (POST_BESITZER):
+#   "kalender_tag"        (von, bis) -> dict    kalender_sicht.ereignisse  (Kalender, Tagesansicht)
+#   "chats_unbeantwortet" () -> int             server.posteingang()       (Menue-Zaehler Posteingang)
+#   "mails_offen"         () -> int             post_erledigt.mails_offen  (Seite Mails, Gesamtzahl)
+# Freigaben und Kundentermine zaehlt der Abholer selbst mit derselben Abfrage wie die Oberflaeche.
 # Bewusst NICHT benutzt: postfach_lesen (schreibt im Rueckfall), entwuerfe_offen (zaehlt auch
 # freigegebene LinkedIn-Entwuerfe mit). Fehlt eine Anbindung, endet der Auftrag mit `fehler`.
 ANBINDUNG: dict = {}
 ZEITZONE = "Europe/Berlin"
+# Hoechstens so lange wartet der eine Kalenderabruf je Auftrag (kalender.TIMEOUT_S, ohne Wiederholung).
+KALENDER_ZEITLIMIT_S = 8.0
+
+# Abfragen wie in der Oberflaeche (ui.py: Menue-Zaehler /freigaben, Startseite "Termine heute",
+# server.entwuerfe_offen: anzahl_fehlgeschlagen). Ein Test vergleicht sie mit ui.py.
+SQL_FREIGABEN_WARTEND = "select count(*) n from drafts where status = 'pending'"
+SQL_FREIGABEN_FEHLGESCHLAGEN = "select count(*) as n from drafts where status = 'failed'"
+SQL_KUNDENTERMINE_HEUTE = ("select count(*) as n from activities a where a.type = 'termin' "
+                           "and a.payload->>'datum' = %s")
 
 
 def _anbindung(name: str):
@@ -119,47 +131,39 @@ def _anbindung(name: str):
     return fn
 
 
-def _heute_ende(jetzt):
+def _tag(jetzt):
     from datetime import datetime, time, timedelta
-    return datetime.combine(jetzt.date() + timedelta(days=1), time.min, tzinfo=jetzt.tzinfo)
+    beginn = datetime.combine(jetzt.date(), time.min, tzinfo=jetzt.tzinfo)
+    return beginn, beginn + timedelta(days=1)
 
 
 def termine_heute(q, eingabe: dict, verborgen, *, jetzt=None) -> dict:
-    """Termine, die heute noch anstehen (alle Kalender, wie sie der Agent sieht), Kundentermine von
-    heute laut Kundenakte, und wie viele Kalender gerade nichts sagen. Nur Zahlen."""
+    """Termine von heute, wie sie die Tagesansicht des Kalenders zeigt, die Kundentermine von heute
+    wie die Kachel der Startseite, und wie viele Kalender gerade nichts sagen. Nur Zahlen."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
     jetzt = jetzt or datetime.now(ZoneInfo(ZEITZONE))
-    ende = _heute_ende(jetzt)
-    eintraege, luecken = _anbindung("kalender")()
-    anzahl = 0
-    for e in eintraege:
-        beginn, schluss = e.get("beginn"), e.get("ende") or e.get("beginn")
-        if not (isinstance(beginn, datetime) and isinstance(schluss, datetime)):
-            continue
-        # Der eigene Kalender kann Zeiten ohne Zone liefern (wie server.py beim Buchen): Ortszeit.
-        beginn = beginn if beginn.tzinfo else beginn.replace(tzinfo=jetzt.tzinfo)
-        schluss = schluss if schluss.tzinfo else schluss.replace(tzinfo=jetzt.tzinfo)
-        if beginn < ende and schluss >= jetzt:
-            anzahl += 1
-    kunden = q("select count(*) as n from activities a where a.type = 'termin' and a.payload->>'datum' = %s",
-               (jetzt.date().isoformat(),))[0]["n"]
-    return {"anzahl": min(anzahl, 500), "anzahl_kunden": min(int(kunden), 500),
-            "quellen_stumm": min(len(luecken), 50)}
+    von, bis = _tag(jetzt)
+    sicht = _anbindung("kalender_tag")(von, bis)
+    kunden = q(SQL_KUNDENTERMINE_HEUTE, (jetzt.date().isoformat(),))[0]["n"]
+    return {"anzahl": min(len(sicht["ereignisse"]), 500), "anzahl_kunden": min(int(kunden), 500),
+            "quellen_stumm": min(len(sicht["hinweise"]), 50)}
 
 
 def freigaben_zaehlen(q, eingabe: dict, verborgen) -> dict:
-    """Entwuerfe, die auf die Freigabe warten (nur `pending`), und fehlgeschlagene. Nur Zahlen."""
-    z = q("select count(*) filter (where status = 'pending') as wartend, "
-          "count(*) filter (where status = 'failed') as fehlgeschlagen from drafts")[0]
-    return {"wartend": min(int(z["wartend"]), 10000), "fehlgeschlagen": min(int(z["fehlgeschlagen"]), 10000)}
+    """Wartende Entwuerfe (Stand `pending`, wie der Zaehler am Menue ohne Zusatz aus Marketing und
+    Bewerbungen) und fehlgeschlagene. Nur Zahlen."""
+    wartend = q(SQL_FREIGABEN_WARTEND)[0]["n"]
+    fehlgeschlagen = q(SQL_FREIGABEN_FEHLGESCHLAGEN)[0]["n"]
+    return {"wartend": min(int(wartend), 10000), "fehlgeschlagen": min(int(fehlgeschlagen), 10000)}
 
 
 def post_offen(q, eingabe: dict, verborgen) -> dict:
-    """Unbeantwortete Kundennachrichten in den Chat-Kanaelen und offene Mails. Nur Zahlen."""
+    """Unbeantwortete Chats wie der Menue-Zaehler Posteingang und offene Mails, wie sie die Seite
+    Mails dem Ladenbesitzer zeigt. Nur Zahlen."""
     chats = int(_anbindung("chats_unbeantwortet")())
-    mails = q(f"select count(*) as n from post_mails m where {_anbindung('mails_offen_sql')()}")[0]["n"]
-    return {"chats_unbeantwortet": min(chats, 10000), "mails_offen": min(int(mails), 10000)}
+    mails = int(_anbindung("mails_offen")())
+    return {"chats_unbeantwortet": min(chats, 10000), "mails_offen": min(mails, 10000)}
 
 
 # Art -> Funktion(q, eingabe, verborgen) -> Ergebnis. Eine Art ohne Eintrag ist nicht ausfuehrbar.
@@ -167,17 +171,33 @@ AUSFUEHRER = {"kontakt_finden": kontakt_finden, "termine_heute": termine_heute,
               "freigaben_zaehlen": freigaben_zaehlen, "post_offen": post_offen}
 
 
-def anbinden(server, post_erledigt) -> None:
-    """Die Zaehlarten an die lesenden Wege von sales-mcp haengen (nur in main)."""
+def anbinden(server, post_erledigt, post_struktur, kalender_sicht, kalender) -> None:
+    """Die Zaehlarten an dieselben lesenden Wege haengen, die die Seiten benutzen (nur in main).
+    Ohne Ladenbesitzer (POST_BESITZER) gibt es keine Sicht: Kalender und Mails enden dann mit `fehler`."""
     import json
 
+    kalender.TIMEOUT_S = min(float(kalender.TIMEOUT_S), KALENDER_ZEITLIMIT_S)
+
+    def besitzer() -> str:
+        name = post_struktur.container_besitzer()
+        if not name:
+            raise LookupError("besitzer")
+        return name
+
     def chats() -> int:
-        roh = server.posteingang(stunden=48)
+        roh = server.posteingang()
         daten = json.loads(roh) if isinstance(roh, str) else roh
         return int(daten["anzahl_unbeantwortet"])
-    ANBINDUNG.update({"kalender": lambda: server.belegungen(tage_voraus=1),
+
+    def mails() -> int:
+        b = post_struktur.betrachter_laden(besitzer())
+        if b is None:
+            raise LookupError("betrachter")
+        return int(post_erledigt.mails_offen(b)[1])
+
+    ANBINDUNG.update({"kalender_tag": lambda von, bis: kalender_sicht.ereignisse(von, bis, besitzer()),
                       "chats_unbeantwortet": chats,
-                      "mails_offen_sql": post_erledigt.offen_sql})
+                      "mails_offen": mails})
 
 
 def agent_fragen(aid: str, system: str, auftrag: str, funktion: dict, *,
@@ -312,11 +332,14 @@ def main() -> int:
         LOG.error("%s - der Abholer wartet, ohne einen Auftrag anzufassen.", hindernis)
         _STOPP.wait()
         return 0
+    import kalender
+    import kalender_sicht
     import post_erledigt
+    import post_struktur
 
     arten = auftrag_vertrag.lade()
     verborgen = verborgen_aus_server(server)
-    anbinden(server, post_erledigt)
+    anbinden(server, post_erledigt, post_struktur, kalender_sicht, kalender)
     LOG.info("Start: schema=%s laden=%s takt=%ds frei=%s arten=%s", server.SCHEMA, laden(), TAKT_S,
              ",".join(sorted(arten_frei())) or "-",
              ",".join(f"{a.art}v{a.version}:{auftrag_vertrag.art_hash(a)[:8]}" for a in arten.values()))

@@ -11,9 +11,9 @@ PRUEFSUMMEN = {
 }
 # Vorschlag fuer den Vertrag, dort noch nicht eingetragen. Wandert nach PRUEFSUMMEN, sobald er drin steht.
 VORSCHLAG = {
-    ("termine_heute", 1): "35aa4fb717ca0af4a1acffd9e134ce0cb96d4f25b26cfee5688599efda89d751",
+    ("termine_heute", 1): "badeaa3eada323bdf0086ce88d86b0209b8e8e03e0be6154188e97828a9eaa2e",
     ("freigaben_zaehlen", 1): "74c669057e253527c633f03a2ed4c7d03010c7819a9e1f39fab9687a7998b98e",
-    ("post_offen", 1): "9fbf2a71ec72649208efed8e842c893e7055f0bb74c63f97e2b634186c591a3f",
+    ("post_offen", 1): "90430f4e8be3989f2d4d3ec82518a5437f41601d37631d4139c6042a5a392771",
 }
 ZAEHLARTEN = {art for art, _ in VORSCHLAG}
 KID = "0123abcd-0000-4000-8000-000000000001"

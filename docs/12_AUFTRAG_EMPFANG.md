@@ -39,17 +39,30 @@ fester Form zurück. Bisher war Sales im Auftragsbuch nur Absender (`auftrag_buc
 | `post_offen` | 1 (Vorschlag) | nein | nein | ja, ohne Sprachmodell |
 
 Die drei Zählarten stehen noch nicht im Vertrag von vibemind-os; ihre Prüfsummen hält der Test als Vorschlag
-fest. Sie melden nur ganze Zahlen und lesen nur über Wege, die nichts schreiben:
+fest. Regel: Die Zahl ist die, die der Ladenbesitzer (`POST_BESITZER`) auf der zugehörigen Seite sieht. Die
+Zählarten benutzen deshalb dieselben lesenden Wege wie die Seiten:
 
-- `termine_heute`: `server.belegungen(tage_voraus=1)` (Termine, die heute noch anstehen, und Kalender, die
-  nicht antworten) und die Kundentermine des Tages in `activities` wie die Startseite.
-- `freigaben_zaehlen`: `count(*)` auf `drafts` für `pending` und `failed`. Nicht `entwuerfe_offen`, das
-  freigegebene LinkedIn-Entwürfe mitzählt.
-- `post_offen`: `anzahl_unbeantwortet` aus `server.posteingang(48)` und `count(*)` auf `post_mails` mit
-  `post_erledigt.offen_sql()`. Nicht `postfach_lesen`, das im Rückfall Mails speichert. Gezählt wird für den
-  ganzen Laden, ohne Sicht eines einzelnen Teammitglieds.
+| Art | Feld | gleiche Zahl wie |
+|---|---|---|
+| `termine_heute` | `anzahl` | Tagesansicht des Kalenders (`kalender_sicht.ereignisse`, ganzer Tag) |
+| | `anzahl_kunden` | Kachel „Termine heute" der Startseite |
+| | `quellen_stumm` | Hinweise der Tagesansicht auf Kalender ohne Antwort |
+| `freigaben_zaehlen` | `wartend` | Zähler am Menü „Freigaben", ohne den Zusatz aus Marketing und Bewerbungen |
+| | `fehlgeschlagen` | Block „fehlgeschlagen" der Freigaben (`entwuerfe_offen`) |
+| `post_offen` | `chats_unbeantwortet` | Zähler am Menü „Posteingang" |
+| | `mails_offen` | Gesamtzahl der Seite „Mails" für den Ladenbesitzer |
 
-Die Anbindung setzt `main()` (`auftrag_abholer.anbinden`). Fehlt sie, endet der Auftrag mit `fehler`.
+Nicht benutzt: `postfach_lesen` (speichert im Rückfall Mails), `entwuerfe_offen` als Zahl der Wartenden
+(zählt freigegebene LinkedIn-Entwürfe mit), der Zusatz aus Marketing und Bewerbungen (Netzabruf zu anderen
+Diensten, im Abholer nur ein kalter Zwischenspeicher).
+
+Der Kalenderabruf beim Anbieter ist ein einzelner lesender Aufruf je Auftrag ohne Wiederholung; `anbinden`
+begrenzt seine Wartezeit auf 8 Sekunden. Ohne `POST_BESITZER` enden `termine_heute` und `post_offen` mit
+`fehler`.
+
+`tests/test_auftrag_zaehlen_wie_seite.py` rechnet beide Wege gegen dieselben Daten in `sales_test`. Er braucht
+die Test-Datenbank und läuft nur in der vollen Reihe; lokal ohne sie wird er übersprungen. Ein echter
+Kalender wird dort nie gefragt.
 
 `kontakt_finden` sucht nur im Namen und liest nur Kennung, Name und Firma. Adresse und Nummer verlassen die
 Datenbank nicht. Private, archivierte und zur Löschung vermerkte Kontakte werden nicht gemeldet.
@@ -90,6 +103,7 @@ Empfänger haben. Seine Kennung steht in `AUFTRAG_TEST_KONTAKT_ID`, nie im Repo.
 | `LADEN_PRAEFIX` | der eigene Laden; nur dessen Aufträge werden übernommen | `sales` |
 | `AUFTRAG_ARTEN_FREI` | freigeschaltete Arten, durch Komma getrennt; leer schaltet alles ab | `kontakt_finden` |
 | `AUFTRAG_TEST_KONTAKT_ID` | Kennung des einen Testkontakts für verändernde Arten | leer |
+| `POST_BESITZER` | Ladenbesitzer, mit dessen Augen die Zählarten sehen; wie bei sales-ui | leer |
 | `OPENCLAW_URL`, `OPENCLAW_GATEWAY_TOKEN` | nur für Arten mit Urteil; heute nicht nötig | leer |
 
 Der Gateway-Token ist Betreiber-Zugang. Er kommt erst in die Umgebung dieses Dienstes, wenn eine Art ihn
@@ -122,8 +136,11 @@ Ohne Datenbank und ohne Env-Datei, aus `sales-mcp/`:
 python -m pytest tests/test_auftrag_vertrag.py tests/test_auftrag_abholer.py tests/test_auftrag_kennung.py tests/test_auftrag_empfang_sql.py -q -p no:cacheprovider
 ```
 
+Mit Test-Datenbank zusätzlich `tests/test_auftrag_zaehlen_wie_seite.py` (Zahl wie auf der Seite).
+
 Nicht getestet: die SQL-Datei gegen eine echte Datenbank, der Dienst im Container, die Verdrahtung
-`verborgen_aus_server` mit dem echten `server.py`, der Agent `auftrag` in einem laufenden Gateway.
+`verborgen_aus_server` und `anbinden` mit dem echten `server.py`, der Vergleich mit den Seiten (braucht
+`sales_test`), der Agent `auftrag` in einem laufenden Gateway.
 
 ## Ausrollen (nicht ausgeführt)
 
@@ -153,6 +170,9 @@ im Auftragsbuch kein Auftrag an Sales entstehen kann.
          - LADEN_PRAEFIX=${LADEN_PRAEFIX:-sales}
          - AUFTRAG_ARTEN_FREI=${AUFTRAG_ARTEN_FREI:-kontakt_finden}
          - AUFTRAG_TEST_KONTAKT_ID=${AUFTRAG_TEST_KONTAKT_ID:-}
+         - POST_BESITZER=${POST_BESITZER:-}
+         - CALDAV_TIMEOUT_S=8
+         # dazu die Kalender-Zugangsdaten wie bei sales-mcp, nur wenn termine_heute freigeschaltet wird
        logging:
          driver: json-file
          options:

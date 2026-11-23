@@ -291,8 +291,10 @@ def test_uebergabe_ohne_gateway_zugang_sendet_nichts(monkeypatch):
 
 
 # --- Zaehlarten ----------------------------------------------------------------------------------
+# Hier gegen Attrappen. Der Vergleich mit den Seiten gegen dieselben Testdaten steht in
+# tests/test_auftrag_zaehlen_wie_seite.py (braucht die Test-Datenbank, laeuft in der vollen Reihe).
 
-from datetime import datetime, timedelta  # noqa: E402
+from datetime import datetime  # noqa: E402
 from zoneinfo import ZoneInfo  # noqa: E402
 
 BERLIN = ZoneInfo("Europe/Berlin")
@@ -306,71 +308,112 @@ def zaehlbuch(art, zahlen):
     return buch
 
 
-def test_freigaben_zaehlen_nur_pending_und_failed():
-    buch = zaehlbuch("freigaben_zaehlen", {"drafts": {"wartend": 4, "fehlgeschlagen": 1}})
+def test_freigaben_zaehlen_mit_den_abfragen_der_oberflaeche():
+    buch = zaehlbuch("freigaben_zaehlen", {"drafts": {"n": 4}})
     assert lauf(buch, frei=ALLE) == {"fertig": 1, "fehler": 0}
-    assert buch.fertig[AID] == {"wartend": 4, "fehlgeschlagen": 1}
-    zaehlung = next(s for s in buch.sql if "from drafts" in s)
-    assert "'pending'" in zaehlung and "'failed'" in zaehlung and "'approved'" not in zaehlung
+    assert buch.fertig[AID] == {"wartend": 4, "fehlgeschlagen": 4}
+    assert ab.SQL_FREIGABEN_WARTEND in buch.sql and ab.SQL_FREIGABEN_FEHLGESCHLAGEN in buch.sql
+    assert "'pending'" in ab.SQL_FREIGABEN_WARTEND and "'failed'" in ab.SQL_FREIGABEN_FEHLGESCHLAGEN
 
 
-def test_post_offen_zaehlt_chats_und_mails_ohne_inhalte(monkeypatch):
-    monkeypatch.setattr(ab, "ANBINDUNG", {"chats_unbeantwortet": lambda: 5, "mails_offen_sql": lambda: "(true)"})
-    buch = zaehlbuch("post_offen", {"post_mails": {"n": 2}})
+def test_post_offen_nimmt_die_zahlen_der_seiten(monkeypatch):
+    monkeypatch.setattr(ab, "ANBINDUNG", {"chats_unbeantwortet": lambda: 5, "mails_offen": lambda: 2})
+    buch = zaehlbuch("post_offen", {})
     assert lauf(buch, frei=ALLE) == {"fertig": 1, "fehler": 0}
     assert buch.fertig[AID] == {"chats_unbeantwortet": 5, "mails_offen": 2}
-    assert any("from post_mails m where (true)" in s for s in buch.sql)
 
 
-def test_termine_heute_zaehlt_nur_was_heute_noch_ansteht(monkeypatch):
-    def t(stunden, dauer=1, zone=True):
-        b = JETZT + timedelta(hours=stunden)
-        b = b if zone else b.replace(tzinfo=None)
-        return {"beginn": b, "ende": b + timedelta(hours=dauer), "titel": "geheim", "ort": "geheim"}
-    eintraege = [t(-3), t(-1, 2), t(2), t(5, zone=False), t(15), t(30)]   # vorbei, laeuft, 2x heute, morgen
-    monkeypatch.setattr(ab, "ANBINDUNG", {"kalender": lambda: (eintraege, [{"quelle": "x", "grund": "y"}])})
-    buch = Buch()
-    ergebnis = ab.termine_heute(lambda sql, p=(): (buch.sql.append(sql), [{"n": 2}])[1], {}, nie_verborgen,
-                                jetzt=JETZT)
+def test_termine_heute_zaehlt_die_tagesansicht_des_ganzen_tages(monkeypatch):
+    gefragt = []
+
+    def tag(von, bis):
+        gefragt.append((von, bis))
+        return {"ereignisse": [{"titel": "geheim"}] * 3, "hinweise": ["Kalender „x“: weg"], "ebenen": []}
+    monkeypatch.setattr(ab, "ANBINDUNG", {"kalender_tag": tag})
+    ergebnis = ab.termine_heute(lambda sql, p=(): [{"n": 2}], {}, nie_verborgen, jetzt=JETZT)
     assert ergebnis == {"anzahl": 3, "anzahl_kunden": 2, "quellen_stumm": 1}
+    assert gefragt == [(datetime(2026, 11, 23, tzinfo=BERLIN), datetime(2026, 11, 24, tzinfo=BERLIN))]
     auftrag_vertrag.pruefe_ergebnis(ARTEN["termine_heute"], ergebnis)
-    assert "geheim" not in json.dumps(ergebnis)
+    assert "geheim" not in json.dumps(ergebnis) and "weg" not in json.dumps(ergebnis)
 
 
 @pytest.mark.parametrize("art", ["termine_heute", "post_offen"])
 def test_zaehlart_ohne_anbindung_endet_mit_fehler(monkeypatch, art):
     monkeypatch.setattr(ab, "ANBINDUNG", {})
-    buch = zaehlbuch(art, {"activities": {"n": 0}, "post_mails": {"n": 0}})
+    buch = zaehlbuch(art, {"activities": {"n": 0}})
     assert lauf(buch, frei=ALLE) == {"fertig": 0, "fehler": 1}
     assert buch.fehler[AID] == f"{ab.GRUND_ABSTURZ} (LookupError)"
 
 
 def test_zaehlarten_sind_ohne_freischaltung_gesperrt():
-    buch = zaehlbuch("freigaben_zaehlen", {"drafts": {"wartend": 1, "fehlgeschlagen": 0}})
+    buch = zaehlbuch("freigaben_zaehlen", {"drafts": {"n": 1}})
     assert lauf(buch) == {"fertig": 0, "fehler": 1}          # Vorgabe: nur kontakt_finden
     assert buch.fehler[AID].startswith(ab.GRUND_GESPERRT)
     assert not any("from drafts" in s for s in buch.sql)
 
 
-def test_anbinden_liest_nur_die_zahl_aus_dem_posteingang():
-    class Server:
-        def posteingang(self, stunden):
-            assert stunden == 48
-            return json.dumps({"anzahl_unbeantwortet": 7, "eintraege": [{"kontakt": "geheim"}]})
+class _Attrappen:
+    """server, post_erledigt, post_struktur, kalender_sicht, kalender fuer anbinden()."""
 
-        def belegungen(self, tage_voraus):
-            return [], []
+    def __init__(self, besitzer="inhaber"):
+        self.rufe = []
+        self.besitzer = besitzer
+        self.TIMEOUT_S = 20.0
 
-    class Post:
-        @staticmethod
-        def offen_sql():
-            return "(false)"
-    alt = dict(ab.ANBINDUNG)
-    try:
-        ab.anbinden(Server(), Post)
-        assert ab.ANBINDUNG["chats_unbeantwortet"]() == 7
-        assert ab.ANBINDUNG["kalender"]() == ([], [])
-        assert ab.ANBINDUNG["mails_offen_sql"]() == "(false)"
-    finally:
-        ab.ANBINDUNG.clear()
-        ab.ANBINDUNG.update(alt)
+    # server
+    def posteingang(self, *a, **k):
+        self.rufe.append(("posteingang", a, k))
+        return json.dumps({"anzahl_unbeantwortet": 7, "eintraege": [{"kontakt": "geheim"}]})
+
+    # post_struktur
+    def container_besitzer(self):
+        return self.besitzer
+
+    def betrachter_laden(self, name):
+        self.rufe.append(("betrachter_laden", name))
+        return {"name": name}
+
+    # post_erledigt
+    def mails_offen(self, b, suche="", seite=1):
+        self.rufe.append(("mails_offen", b))
+        return [{"betreff": "geheim"}], 11
+
+    # kalender_sicht
+    def ereignisse(self, von, bis, betrachter):
+        self.rufe.append(("ereignisse", betrachter))
+        return {"ereignisse": [], "hinweise": [], "ebenen": []}
+
+
+def test_anbinden_sieht_mit_den_augen_des_ladenbesitzers(monkeypatch):
+    monkeypatch.setattr(ab, "ANBINDUNG", {})
+    x = _Attrappen()
+    ab.anbinden(x, x, x, x, x)
+    assert ab.ANBINDUNG["chats_unbeantwortet"]() == 7
+    assert ab.ANBINDUNG["mails_offen"]() == 11
+    assert ab.ANBINDUNG["kalender_tag"](JETZT, JETZT)["ereignisse"] == []
+    assert ("posteingang", (), {}) in x.rufe                     # wie der Menue-Zaehler, ohne Argumente
+    assert ("betrachter_laden", "inhaber") in x.rufe and ("mails_offen", {"name": "inhaber"}) in x.rufe
+    assert ("ereignisse", "inhaber") in x.rufe
+    assert x.TIMEOUT_S == ab.KALENDER_ZEITLIMIT_S                 # kurzer Kalenderabruf
+
+
+def test_anbinden_ohne_ladenbesitzer_zaehlt_keine_mails_und_keinen_kalender(monkeypatch):
+    monkeypatch.setattr(ab, "ANBINDUNG", {})
+    x = _Attrappen(besitzer="")
+    ab.anbinden(x, x, x, x, x)
+    for name, argumente in (("mails_offen", ()), ("kalender_tag", (JETZT, JETZT))):
+        with pytest.raises(LookupError):
+            ab.ANBINDUNG[name](*argumente)
+    assert not any(r[0] in ("mails_offen", "ereignisse") for r in x.rufe)
+
+
+def test_abfragen_stehen_woertlich_so_in_der_oberflaeche():
+    """Ohne Datenbank: dieselben Abfragen wie Menue-Zaehler, Startseite und entwuerfe_offen."""
+    from pathlib import Path
+    wurzel = Path(__file__).resolve().parents[1]
+    flach = lambda text: " ".join(text.replace('"', " ").split())            # noqa: E731
+    ui_text = flach((wurzel / "ui.py").read_text(encoding="utf-8"))
+    server_text = flach((wurzel / "server.py").read_text(encoding="utf-8"))
+    assert flach(ab.SQL_FREIGABEN_WARTEND) in ui_text
+    assert flach(ab.SQL_KUNDENTERMINE_HEUTE) in ui_text
+    assert flach(ab.SQL_FREIGABEN_FEHLGESCHLAGEN) in server_text
