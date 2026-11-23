@@ -115,3 +115,90 @@ auftragsarten:
           type: integer
           minimum: 0
           maximum: 10
+
+  # Die drei Zaehlarten sind ein Vorschlag fuer den Vertrag von vibemind-os (noch nicht dort).
+  - art: termine_heute
+    version: 1
+    veraendert: false
+    frist_min: 5
+    nachpruefung: form
+    beschreibung: >-
+      Sales zählt die Termine, die heute noch anstehen, in allen Kalendern,
+      dazu die Kundentermine von heute laut Kundenakte und die Kalender, die
+      gerade nicht antworten. Es wird nichts verändert. Gemeldet werden nur
+      Zahlen, nie Titel, Namen oder Orte.
+    eingabe:
+      type: object
+      additionalProperties: false
+      properties: {}
+    ergebnis:
+      type: object
+      additionalProperties: false
+      required: [anzahl, anzahl_kunden, quellen_stumm]
+      properties:
+        anzahl:
+          type: integer
+          minimum: 0
+          maximum: 500
+        anzahl_kunden:
+          type: integer
+          minimum: 0
+          maximum: 500
+        quellen_stumm:
+          type: integer
+          minimum: 0
+          maximum: 50
+
+  - art: freigaben_zaehlen
+    version: 1
+    veraendert: false
+    frist_min: 5
+    nachpruefung: form
+    beschreibung: >-
+      Sales zählt die Entwürfe, die auf die Freigabe des Betreibers warten, und
+      die fehlgeschlagenen. Es wird nichts verändert und nichts freigegeben.
+      Gemeldet werden nur Zahlen, nie Empfänger oder Texte.
+    eingabe:
+      type: object
+      additionalProperties: false
+      properties: {}
+    ergebnis:
+      type: object
+      additionalProperties: false
+      required: [wartend, fehlgeschlagen]
+      properties:
+        wartend:
+          type: integer
+          minimum: 0
+          maximum: 10000
+        fehlgeschlagen:
+          type: integer
+          minimum: 0
+          maximum: 10000
+
+  - art: post_offen
+    version: 1
+    veraendert: false
+    frist_min: 5
+    nachpruefung: form
+    beschreibung: >-
+      Sales zählt unbeantwortete Kundennachrichten in den Chat-Kanälen und
+      Mails, die noch nicht erledigt sind. Es wird nichts verändert und nichts
+      abgeholt. Gemeldet werden nur Zahlen, nie Absender, Betreffs oder Texte.
+    eingabe:
+      type: object
+      additionalProperties: false
+      properties: {}
+    ergebnis:
+      type: object
+      additionalProperties: false
+      required: [chats_unbeantwortet, mails_offen]
+      properties:
+        chats_unbeantwortet:
+          type: integer
+          minimum: 0
+          maximum: 10000
+        mails_offen:
+          type: integer
+          minimum: 0
+          maximum: 10000

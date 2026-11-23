@@ -34,6 +34,22 @@ fester Form zurück. Bisher war Sales im Auftragsbuch nur Absender (`auftrag_buc
 |---|---|---|---|---|
 | `kontakt_finden` | 1 | nein | ja (Vorgabe) | ja, ohne Sprachmodell |
 | `post_pruefen` | 2 | ja | nein | nein, wird mit Grund abgelehnt |
+| `termine_heute` | 1 (Vorschlag) | nein | nein | ja, ohne Sprachmodell |
+| `freigaben_zaehlen` | 1 (Vorschlag) | nein | nein | ja, ohne Sprachmodell |
+| `post_offen` | 1 (Vorschlag) | nein | nein | ja, ohne Sprachmodell |
+
+Die drei Zählarten stehen noch nicht im Vertrag von vibemind-os; ihre Prüfsummen hält der Test als Vorschlag
+fest. Sie melden nur ganze Zahlen und lesen nur über Wege, die nichts schreiben:
+
+- `termine_heute`: `server.belegungen(tage_voraus=1)` (Termine, die heute noch anstehen, und Kalender, die
+  nicht antworten) und die Kundentermine des Tages in `activities` wie die Startseite.
+- `freigaben_zaehlen`: `count(*)` auf `drafts` für `pending` und `failed`. Nicht `entwuerfe_offen`, das
+  freigegebene LinkedIn-Entwürfe mitzählt.
+- `post_offen`: `anzahl_unbeantwortet` aus `server.posteingang(48)` und `count(*)` auf `post_mails` mit
+  `post_erledigt.offen_sql()`. Nicht `postfach_lesen`, das im Rückfall Mails speichert. Gezählt wird für den
+  ganzen Laden, ohne Sicht eines einzelnen Teammitglieds.
+
+Die Anbindung setzt `main()` (`auftrag_abholer.anbinden`). Fehlt sie, endet der Auftrag mit `fehler`.
 
 `kontakt_finden` sucht nur im Namen und liest nur Kennung, Name und Firma. Adresse und Nummer verlassen die
 Datenbank nicht. Private, archivierte und zur Löschung vermerkte Kontakte werden nicht gemeldet.

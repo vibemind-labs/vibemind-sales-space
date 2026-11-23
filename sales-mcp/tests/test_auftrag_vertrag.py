@@ -9,6 +9,13 @@ PRUEFSUMMEN = {
     ("post_pruefen", 2): "33235cd08d2f890411d79c746073caaa735f47bfbec8bc4a44f8275be44e24f7",
     ("kontakt_finden", 1): "861ecd0af8279ca2c5164e005d07bee24fa38e315dcab1b5b3d26051f32a43b8",
 }
+# Vorschlag fuer den Vertrag, dort noch nicht eingetragen. Wandert nach PRUEFSUMMEN, sobald er drin steht.
+VORSCHLAG = {
+    ("termine_heute", 1): "35aa4fb717ca0af4a1acffd9e134ce0cb96d4f25b26cfee5688599efda89d751",
+    ("freigaben_zaehlen", 1): "74c669057e253527c633f03a2ed4c7d03010c7819a9e1f39fab9687a7998b98e",
+    ("post_offen", 1): "9fbf2a71ec72649208efed8e842c893e7055f0bb74c63f97e2b634186c591a3f",
+}
+ZAEHLARTEN = {art for art, _ in VORSCHLAG}
 KID = "0123abcd-0000-4000-8000-000000000001"
 
 
@@ -17,15 +24,34 @@ def arten():
     return av.lade()
 
 
-def test_beide_arten_geladen(arten):
-    assert set(arten) == {"post_pruefen", "kontakt_finden"}
-    assert arten["kontakt_finden"].veraendert is False
-    assert arten["kontakt_finden"].nachpruefung == "form"
+def test_alle_arten_geladen(arten):
+    assert set(arten) == {"post_pruefen", "kontakt_finden"} | ZAEHLARTEN
+    for art in {"kontakt_finden"} | ZAEHLARTEN:
+        assert arten[art].veraendert is False
+        assert arten[art].nachpruefung == "form"
     assert arten["post_pruefen"].veraendert is True
 
 
-def test_jede_art_ist_woertlich_der_vertrag_von_vibemind(arten):
-    assert {(a.art, a.version): av.art_hash(a) for a in arten.values()} == PRUEFSUMMEN
+def test_jede_art_ist_woertlich_der_vertrag_von_vibemind_oder_der_vorschlag(arten):
+    assert {(a.art, a.version): av.art_hash(a) for a in arten.values()} == PRUEFSUMMEN | VORSCHLAG
+
+
+@pytest.mark.parametrize("art, felder", [
+    ("termine_heute", ("anzahl", "anzahl_kunden", "quellen_stumm")),
+    ("freigaben_zaehlen", ("wartend", "fehlgeschlagen")),
+    ("post_offen", ("chats_unbeantwortet", "mails_offen")),
+])
+def test_zaehlarten_nehmen_nichts_und_melden_nur_zahlen(arten, art, felder):
+    a = arten[art]
+    av.pruefe_eingabe(a, {})
+    with pytest.raises(av.FormFehler):
+        av.pruefe_eingabe(a, {"suche": "x"})
+    gut = dict.fromkeys(felder, 0)
+    av.pruefe_ergebnis(a, gut)
+    for falsch in ({felder[0]: 1}, {**gut, felder[0]: -1}, {**gut, felder[0]: "3"}, {**gut, felder[0]: 1.5},
+                   {**gut, "titel": "Name"}):
+        with pytest.raises(av.FormFehler):
+            av.pruefe_ergebnis(a, falsch)
 
 
 def test_ergebnis_post_pruefen_v2_nur_pfade_und_saubere_kennungen(arten):

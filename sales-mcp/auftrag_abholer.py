@@ -102,8 +102,82 @@ def kontakt_finden(q, eingabe: dict, verborgen) -> dict:
     return {"treffer": treffer, "anzahl": len(treffer)}
 
 
+# Anbindung der Zaehlarten an sales-mcp, gesetzt in main() (anbinden). Nur lesende Wege:
+#   "kalender"            () -> (eintraege, luecken)   server.belegungen(tage_voraus=1)
+#   "chats_unbeantwortet" () -> int                    server.posteingang: anzahl_unbeantwortet
+#   "mails_offen_sql"     () -> str                    post_erledigt.offen_sql()
+# Bewusst NICHT benutzt: postfach_lesen (schreibt im Rueckfall), entwuerfe_offen (zaehlt auch
+# freigegebene LinkedIn-Entwuerfe mit). Fehlt eine Anbindung, endet der Auftrag mit `fehler`.
+ANBINDUNG: dict = {}
+ZEITZONE = "Europe/Berlin"
+
+
+def _anbindung(name: str):
+    fn = ANBINDUNG.get(name)
+    if fn is None:
+        raise LookupError(name)          # nur der Typ geht ins Auftragsbuch
+    return fn
+
+
+def _heute_ende(jetzt):
+    from datetime import datetime, time, timedelta
+    return datetime.combine(jetzt.date() + timedelta(days=1), time.min, tzinfo=jetzt.tzinfo)
+
+
+def termine_heute(q, eingabe: dict, verborgen, *, jetzt=None) -> dict:
+    """Termine, die heute noch anstehen (alle Kalender, wie sie der Agent sieht), Kundentermine von
+    heute laut Kundenakte, und wie viele Kalender gerade nichts sagen. Nur Zahlen."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    jetzt = jetzt or datetime.now(ZoneInfo(ZEITZONE))
+    ende = _heute_ende(jetzt)
+    eintraege, luecken = _anbindung("kalender")()
+    anzahl = 0
+    for e in eintraege:
+        beginn, schluss = e.get("beginn"), e.get("ende") or e.get("beginn")
+        if not (isinstance(beginn, datetime) and isinstance(schluss, datetime)):
+            continue
+        # Der eigene Kalender kann Zeiten ohne Zone liefern (wie server.py beim Buchen): Ortszeit.
+        beginn = beginn if beginn.tzinfo else beginn.replace(tzinfo=jetzt.tzinfo)
+        schluss = schluss if schluss.tzinfo else schluss.replace(tzinfo=jetzt.tzinfo)
+        if beginn < ende and schluss >= jetzt:
+            anzahl += 1
+    kunden = q("select count(*) as n from activities a where a.type = 'termin' and a.payload->>'datum' = %s",
+               (jetzt.date().isoformat(),))[0]["n"]
+    return {"anzahl": min(anzahl, 500), "anzahl_kunden": min(int(kunden), 500),
+            "quellen_stumm": min(len(luecken), 50)}
+
+
+def freigaben_zaehlen(q, eingabe: dict, verborgen) -> dict:
+    """Entwuerfe, die auf die Freigabe warten (nur `pending`), und fehlgeschlagene. Nur Zahlen."""
+    z = q("select count(*) filter (where status = 'pending') as wartend, "
+          "count(*) filter (where status = 'failed') as fehlgeschlagen from drafts")[0]
+    return {"wartend": min(int(z["wartend"]), 10000), "fehlgeschlagen": min(int(z["fehlgeschlagen"]), 10000)}
+
+
+def post_offen(q, eingabe: dict, verborgen) -> dict:
+    """Unbeantwortete Kundennachrichten in den Chat-Kanaelen und offene Mails. Nur Zahlen."""
+    chats = int(_anbindung("chats_unbeantwortet")())
+    mails = q(f"select count(*) as n from post_mails m where {_anbindung('mails_offen_sql')()}")[0]["n"]
+    return {"chats_unbeantwortet": min(chats, 10000), "mails_offen": min(int(mails), 10000)}
+
+
 # Art -> Funktion(q, eingabe, verborgen) -> Ergebnis. Eine Art ohne Eintrag ist nicht ausfuehrbar.
-AUSFUEHRER = {"kontakt_finden": kontakt_finden}
+AUSFUEHRER = {"kontakt_finden": kontakt_finden, "termine_heute": termine_heute,
+              "freigaben_zaehlen": freigaben_zaehlen, "post_offen": post_offen}
+
+
+def anbinden(server, post_erledigt) -> None:
+    """Die Zaehlarten an die lesenden Wege von sales-mcp haengen (nur in main)."""
+    import json
+
+    def chats() -> int:
+        roh = server.posteingang(stunden=48)
+        daten = json.loads(roh) if isinstance(roh, str) else roh
+        return int(daten["anzahl_unbeantwortet"])
+    ANBINDUNG.update({"kalender": lambda: server.belegungen(tage_voraus=1),
+                      "chats_unbeantwortet": chats,
+                      "mails_offen_sql": post_erledigt.offen_sql})
 
 
 def agent_fragen(aid: str, system: str, auftrag: str, funktion: dict, *,
@@ -238,8 +312,11 @@ def main() -> int:
         LOG.error("%s - der Abholer wartet, ohne einen Auftrag anzufassen.", hindernis)
         _STOPP.wait()
         return 0
+    import post_erledigt
+
     arten = auftrag_vertrag.lade()
     verborgen = verborgen_aus_server(server)
+    anbinden(server, post_erledigt)
     LOG.info("Start: schema=%s laden=%s takt=%ds frei=%s arten=%s", server.SCHEMA, laden(), TAKT_S,
              ",".join(sorted(arten_frei())) or "-",
              ",".join(f"{a.art}v{a.version}:{auftrag_vertrag.art_hash(a)[:8]}" for a in arten.values()))

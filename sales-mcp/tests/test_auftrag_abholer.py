@@ -55,7 +55,14 @@ class Buch:
         if "from leads" in sql:
             self.muster = params[0]
             return list(self.kontakte)
+        for tabelle, zeile in self.zahlen.items():      # Zaehlarten: nur count(*) auf je einer Tabelle
+            if f"from {tabelle}" in sql:
+                assert sql.lstrip().startswith("select count(*)"), sql
+                self.zaehlparams = params
+                return [zeile]
         raise AssertionError("unerwartete Abfrage")
+
+    zahlen: dict = {}
 
 
 def nie_verborgen(_enrichment):
@@ -281,3 +288,89 @@ def test_uebergabe_ohne_gateway_zugang_sendet_nichts(monkeypatch):
     monkeypatch.setattr(gateway, "_http", lambda *a, **k: pytest.fail("darf nicht senden"))
     with pytest.raises(gateway.GatewayTransient):
         ab.agent_fragen(AID, "System", "Auftrag", FUNKTION, url="", token="")
+
+
+# --- Zaehlarten ----------------------------------------------------------------------------------
+
+from datetime import datetime, timedelta  # noqa: E402
+from zoneinfo import ZoneInfo  # noqa: E402
+
+BERLIN = ZoneInfo("Europe/Berlin")
+JETZT = datetime(2026, 11, 23, 10, 0, tzinfo=BERLIN)
+ALLE = {"kontakt_finden", "termine_heute", "freigaben_zaehlen", "post_offen"}
+
+
+def zaehlbuch(art, zahlen):
+    buch = Buch(auftrag(art=art, eingabe={}))
+    buch.zahlen = zahlen
+    return buch
+
+
+def test_freigaben_zaehlen_nur_pending_und_failed():
+    buch = zaehlbuch("freigaben_zaehlen", {"drafts": {"wartend": 4, "fehlgeschlagen": 1}})
+    assert lauf(buch, frei=ALLE) == {"fertig": 1, "fehler": 0}
+    assert buch.fertig[AID] == {"wartend": 4, "fehlgeschlagen": 1}
+    zaehlung = next(s for s in buch.sql if "from drafts" in s)
+    assert "'pending'" in zaehlung and "'failed'" in zaehlung and "'approved'" not in zaehlung
+
+
+def test_post_offen_zaehlt_chats_und_mails_ohne_inhalte(monkeypatch):
+    monkeypatch.setattr(ab, "ANBINDUNG", {"chats_unbeantwortet": lambda: 5, "mails_offen_sql": lambda: "(true)"})
+    buch = zaehlbuch("post_offen", {"post_mails": {"n": 2}})
+    assert lauf(buch, frei=ALLE) == {"fertig": 1, "fehler": 0}
+    assert buch.fertig[AID] == {"chats_unbeantwortet": 5, "mails_offen": 2}
+    assert any("from post_mails m where (true)" in s for s in buch.sql)
+
+
+def test_termine_heute_zaehlt_nur_was_heute_noch_ansteht(monkeypatch):
+    def t(stunden, dauer=1, zone=True):
+        b = JETZT + timedelta(hours=stunden)
+        b = b if zone else b.replace(tzinfo=None)
+        return {"beginn": b, "ende": b + timedelta(hours=dauer), "titel": "geheim", "ort": "geheim"}
+    eintraege = [t(-3), t(-1, 2), t(2), t(5, zone=False), t(15), t(30)]   # vorbei, laeuft, 2x heute, morgen
+    monkeypatch.setattr(ab, "ANBINDUNG", {"kalender": lambda: (eintraege, [{"quelle": "x", "grund": "y"}])})
+    buch = Buch()
+    ergebnis = ab.termine_heute(lambda sql, p=(): (buch.sql.append(sql), [{"n": 2}])[1], {}, nie_verborgen,
+                                jetzt=JETZT)
+    assert ergebnis == {"anzahl": 3, "anzahl_kunden": 2, "quellen_stumm": 1}
+    auftrag_vertrag.pruefe_ergebnis(ARTEN["termine_heute"], ergebnis)
+    assert "geheim" not in json.dumps(ergebnis)
+
+
+@pytest.mark.parametrize("art", ["termine_heute", "post_offen"])
+def test_zaehlart_ohne_anbindung_endet_mit_fehler(monkeypatch, art):
+    monkeypatch.setattr(ab, "ANBINDUNG", {})
+    buch = zaehlbuch(art, {"activities": {"n": 0}, "post_mails": {"n": 0}})
+    assert lauf(buch, frei=ALLE) == {"fertig": 0, "fehler": 1}
+    assert buch.fehler[AID] == f"{ab.GRUND_ABSTURZ} (LookupError)"
+
+
+def test_zaehlarten_sind_ohne_freischaltung_gesperrt():
+    buch = zaehlbuch("freigaben_zaehlen", {"drafts": {"wartend": 1, "fehlgeschlagen": 0}})
+    assert lauf(buch) == {"fertig": 0, "fehler": 1}          # Vorgabe: nur kontakt_finden
+    assert buch.fehler[AID].startswith(ab.GRUND_GESPERRT)
+    assert not any("from drafts" in s for s in buch.sql)
+
+
+def test_anbinden_liest_nur_die_zahl_aus_dem_posteingang():
+    class Server:
+        def posteingang(self, stunden):
+            assert stunden == 48
+            return json.dumps({"anzahl_unbeantwortet": 7, "eintraege": [{"kontakt": "geheim"}]})
+
+        def belegungen(self, tage_voraus):
+            return [], []
+
+    class Post:
+        @staticmethod
+        def offen_sql():
+            return "(false)"
+    alt = dict(ab.ANBINDUNG)
+    try:
+        ab.anbinden(Server(), Post)
+        assert ab.ANBINDUNG["chats_unbeantwortet"]() == 7
+        assert ab.ANBINDUNG["kalender"]() == ([], [])
+        assert ab.ANBINDUNG["mails_offen_sql"]() == "(false)"
+    finally:
+        ab.ANBINDUNG.clear()
+        ab.ANBINDUNG.update(alt)
