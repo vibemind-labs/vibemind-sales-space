@@ -39,9 +39,7 @@ fester Form zurück. Bisher war Sales im Auftragsbuch nur Absender (`auftrag_buc
 | `post_offen` | 1 | nein | nein | ja, ohne Sprachmodell |
 
 Die drei Zählarten stehen wörtlich im Vertrag von vibemind-os (Zweig `cc/sales-zaehlarten`, noch nicht auf
-master); der Test hält ihre Prüfsummen fest. Offen: Die Beschreibung von `termine_heute` sagt „Termine, die
-heute noch anstehen"; gezählt wird nach der Regel unten der ganze Tag. Die Textänderung liegt bei der
-Auftragsvertrag-Sitzung. Regel: Die Zahl ist die, die der Ladenbesitzer (`POST_BESITZER`) auf der zugehörigen Seite sieht. Die
+master, Fassung 2); der Test hält ihre Prüfsummen fest. Regel: Die Zahl ist die, die der Ladenbesitzer (`POST_BESITZER`) auf der zugehörigen Seite sieht. Die
 Zählarten benutzen deshalb dieselben lesenden Wege wie die Seiten:
 
 | Art | Feld | gleiche Zahl wie |
