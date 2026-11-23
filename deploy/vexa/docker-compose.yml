@@ -137,6 +137,14 @@ services:
     image: ${VEXA_LITE_IMAGE:-vexaai/vexa-lite:v0.12.28@sha256:9eebb534fdab4079baf11af678968ac8d9679e20ce48db206bcf5a62b85eb538}
     container_name: vexa-lite
     restart: unless-stopped
+    # Alte X-Sperre (23.11.2026): ein Neustart des Containers (VM-Neustart,
+    # restart) laesst /tmp stehen. /tmp/.X99-lock nennt dann eine PID, die jetzt
+    # ein anderer Prozess hat (damals redis); Xvfb haelt :99 fuer belegt, startet
+    # nicht, und jeder Bot scheitert mit "Missing X server". Beim Start laeuft
+    # noch kein X-Server, darum hier vor dem Upstream-Einstieg wegraeumen.
+    # command muss mit: ein eigenes entrypoint verwirft das CMD des Abbilds.
+    entrypoint: ["/bin/sh", "-c", "rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 && exec /entrypoint.sh \"$$@\"", "vexa-lite"]
+    command: ["supervisord", "-n", "-c", "/etc/supervisor/conf.d/vexa.conf"]
     shm_size: 2gb
     depends_on:
       vexa-lite-postgres:
