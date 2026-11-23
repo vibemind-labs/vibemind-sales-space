@@ -185,7 +185,7 @@ def test_absturz_beim_ausfuehren_nennt_nur_den_typ(monkeypatch, caplog):
     buch = Buch(auftrag(), auftrag(aid="0123abcd-0000-4000-8000-000000000002"))
     with caplog.at_level(logging.INFO, logger="auftrag-abholer"):
         assert lauf(buch) == {"fertig": 0, "fehler": 2}       # der zweite Auftrag wird trotzdem bedient
-    assert buch.fehler[AID] == f"{ab.GRUND_ABSTURZ} (RuntimeError)"
+    assert buch.fehler[AID] == f"{ab.GRUND_ABSTURZ}: RuntimeError"
     assert "geheimer Inhalt" not in caplog.text
 
 
@@ -219,10 +219,31 @@ def test_nur_auftraege_des_eigenen_ladens(monkeypatch):
     ("sales_test", "", False),
 ])
 def test_start_nur_wenn_schema_und_laden_zusammenpassen(schema, laden, erlaubt):
-    grund = ab.start_hindernis(schema, laden)
+    grund = ab.start_hindernis(schema, laden, laden or "sales")
     assert (grund is None) is erlaubt
     if not erlaubt:
         assert schema in grund or "Laden" in grund
+
+
+@pytest.mark.parametrize("eigener, buch, erwartet", [
+    ("sales", "", "AUFTRAGSBUCH_LADEN fehlt"),            # Pflicht: ohne ihn startet der Abholer nicht
+    ("sales", "laden-x7", "sind verschieden"),            # Gehirn legt in einen anderen Laden
+    ("sales-test", "sales", "sind verschieden"),
+])
+def test_start_nur_wenn_laden_wie_im_auftragsbuch(eigener, buch, erwartet):
+    schema = "sales_test" if eigener != "sales" else "sales"
+    grund = ab.start_hindernis(schema, eigener, buch)
+    assert grund is not None and erwartet in grund
+    # Die Meldung nennt keinen der beiden Werte, nur gleich oder verschieden.
+    assert "laden-x7" not in grund and "sales-test" not in grund
+    assert ab.start_hindernis(schema, eigener, eigener) is None
+
+
+def test_laden_auftragsbuch_kommt_aus_der_umgebung_ohne_vorgabe(monkeypatch):
+    monkeypatch.delenv("AUFTRAGSBUCH_LADEN", raising=False)
+    assert ab.laden_auftragsbuch() == ""
+    monkeypatch.setenv("AUFTRAGSBUCH_LADEN", " sales ")
+    assert ab.laden_auftragsbuch() == "sales"
 
 
 def test_durchgang_nimmt_hoechstens_die_grenze():
@@ -342,7 +363,7 @@ def test_zaehlart_ohne_anbindung_endet_mit_fehler(monkeypatch, art):
     monkeypatch.setattr(ab, "ANBINDUNG", {})
     buch = zaehlbuch(art, {"activities": {"n": 0}})
     assert lauf(buch, frei=ALLE) == {"fertig": 0, "fehler": 1}
-    assert buch.fehler[AID] == f"{ab.GRUND_ABSTURZ} (LookupError)"
+    assert buch.fehler[AID] == f"{ab.GRUND_ABSTURZ}: LookupError"
 
 
 def test_zaehlarten_sind_ohne_freischaltung_gesperrt():
@@ -417,3 +438,44 @@ def test_abfragen_stehen_woertlich_so_in_der_oberflaeche():
     assert flach(ab.SQL_FREIGABEN_WARTEND) in ui_text
     assert flach(ab.SQL_KUNDENTERMINE_HEUTE) in ui_text
     assert flach(ab.SQL_FREIGABEN_FEHLGESCHLAGEN) in server_text
+
+
+# Positivliste des Gehirns fuer Fehlergruende, Sales-Teil und Datenbank-Saetze: vibemind-os,
+# spaces/auftragsbuch/lieferung/ergebnistext/ergebnis_text.py (GRUENDE, Zweig cc/sales-zaehlarten, 0e0359de).
+# Ein Grund gilt dort, wenn er gleich einem Eintrag ist oder mit "Eintrag:" beginnt; alles andere wird
+# "Grund nicht anzeigbar". Kommt hier ein neuer Grund dazu, muss er dort in die Liste.
+GRUENDE_IM_GEHIRN = {
+    "Auftragsart oder Version ist bei Sales nicht bekannt",
+    "Auftragsart ist bei Sales nicht freigeschaltet",
+    "Veraendernde Auftragsart ohne festgelegten Testkontakt",
+    "Auftragsart ist bei Sales noch nicht ausfuehrbar",
+    "Eingabe passt nicht zur Form der Auftragsart",
+    "Ergebnis passt nicht zur Form der Auftragsart",
+    "Ausfuehrung bei Sales gescheitert",
+    "Bearbeitung bei Sales abgebrochen",
+    "Fehler ohne Angabe",
+    "Zwei Versuche ohne Ergebnis",
+}
+
+
+def _anzeigbar(grund: str) -> bool:
+    g = grund.strip().casefold()
+    return any(g == e.casefold() or (g.startswith(e.casefold()) and g[len(e):].lstrip().startswith(":"))
+               for e in GRUENDE_IM_GEHIRN)
+
+
+def test_jeder_feste_grund_steht_auf_der_liste_des_gehirns():
+    feste = {w for n, w in vars(ab).items() if n.startswith("GRUND_")}
+    assert len(feste) == 7
+    assert feste <= GRUENDE_IM_GEHIRN
+
+
+def test_geschriebene_gruende_sind_im_gehirn_anzeigbar(monkeypatch):
+    def kaputt(q, eingabe, verborgen):
+        raise LookupError("wert")
+    monkeypatch.setitem(ab.AUSFUEHRER, "kontakt_finden", kaputt)
+    buch = Buch(auftrag())
+    lauf(buch)
+    assert buch.fehler[AID] == "Ausfuehrung bei Sales gescheitert: LookupError"
+    assert _anzeigbar(buch.fehler[AID])
+    assert not _anzeigbar("Ausfuehrung bei Sales gescheitert (LookupError)")   # die alte Form zeigte nichts

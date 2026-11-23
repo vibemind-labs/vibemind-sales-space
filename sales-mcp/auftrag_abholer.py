@@ -240,7 +240,7 @@ def bearbeiten(q, a: dict, arten: dict, *, frei: set[str], testkontakt: str, ver
         try:
             ergebnis = AUSFUEHRER[art.art](q, a["eingabe"], verborgen)
         except Exception as e:  # noqa: BLE001 - nur der Typ, der Text kann Inhalte tragen
-            grund = f"{GRUND_ABSTURZ} ({type(e).__name__})"
+            grund = f"{GRUND_ABSTURZ}: {type(e).__name__}"
     if grund is None:
         try:
             auftrag_vertrag.pruefe_ergebnis(art, ergebnis)
@@ -262,6 +262,11 @@ def laden() -> str:
     return os.environ.get("LADEN_PRAEFIX", "").strip() or "sales"
 
 
+def laden_auftragsbuch() -> str:
+    """AUFTRAGSBUCH_LADEN: der Laden, in den das Gehirn Auftraege an Sales legt. Ohne Vorgabe."""
+    return os.environ.get("AUFTRAGSBUCH_LADEN", "").strip()
+
+
 def durchgang(q, arten: dict, *, verborgen, frei: set[str] | None = None, testkontakt: str | None = None,
               hoechstens: int = HOECHSTENS_JE_DURCHGANG) -> dict:
     frei = arten_frei() if frei is None else frei
@@ -280,12 +285,21 @@ def durchgang(q, arten: dict, *, verborgen, frei: set[str] | None = None, testko
     return zaehler
 
 
-def start_hindernis(schema: str, eigener_laden: str) -> str | None:
+def start_hindernis(schema: str, eigener_laden: str, laden_auftragsbuch: str) -> str | None:
     """Grund, aus dem der Abholer nicht arbeiten darf; None, wenn Schema und Laden zusammenpassen.
 
     `sales` und `sales_test` benutzen dieselbe Datenbank-Rolle. Die Huellen trennen nur nach dem Laden,
     den der Abholer selbst nennt. Eine Testinstanz mit dem Laden `sales` naehme dem Betrieb deshalb echte
-    Auftraege weg und beantwortete sie aus den Testdaten."""
+    Auftraege weg und beantwortete sie aus den Testdaten.
+
+    `laden_auftragsbuch` ist AUFTRAGSBUCH_LADEN, der Laden, in den das Gehirn Auftraege an Sales legt. Weicht
+    er vom eigenen Laden ab, faende der Abholer nie einen Auftrag, und jeder liefe still ab. Pflicht, weil
+    Sales eine eigene Umgebung hat (beim Rowboat-Abholer stehen beide Werte in derselben Datei). Die Meldung
+    nennt keinen der beiden Werte, nur gleich oder verschieden."""
+    if not laden_auftragsbuch:
+        return "AUFTRAGSBUCH_LADEN fehlt (Laden, in den das Gehirn Auftraege an Sales legt)"
+    if eigener_laden and laden_auftragsbuch != eigener_laden:
+        return "LADEN_PRAEFIX und AUFTRAGSBUCH_LADEN sind verschieden"
     if schema not in ERLAUBTE_SCHEMAS:
         return f"Schema {schema} wird nicht bedient (nur sales oder sales_test)"
     if not eigener_laden:
@@ -326,7 +340,7 @@ def main() -> int:
     _logging_einrichten()
     signal.signal(signal.SIGTERM, _stopp_anfordern)
     signal.signal(signal.SIGINT, _stopp_anfordern)
-    hindernis = start_hindernis(server.SCHEMA, laden())
+    hindernis = start_hindernis(server.SCHEMA, laden(), laden_auftragsbuch())
     if hindernis:
         # Kein Exit: mit restart: unless-stopped wuerde daraus eine Neustartschleife.
         LOG.error("%s - der Abholer wartet, ohne einen Auftrag anzufassen.", hindernis)
@@ -340,7 +354,8 @@ def main() -> int:
     arten = auftrag_vertrag.lade()
     verborgen = verborgen_aus_server(server)
     anbinden(server, post_erledigt, post_struktur, kalender_sicht, kalender)
-    LOG.info("Start: schema=%s laden=%s takt=%ds frei=%s arten=%s", server.SCHEMA, laden(), TAKT_S,
+    LOG.info("Start: schema=%s laden=%s auftragsbuch_laden=gleich takt=%ds frei=%s arten=%s", server.SCHEMA,
+             laden(), TAKT_S,
              ",".join(sorted(arten_frei())) or "-",
              ",".join(f"{a.art}v{a.version}:{auftrag_vertrag.art_hash(a)[:8]}" for a in arten.values()))
     while not _STOPP.is_set():

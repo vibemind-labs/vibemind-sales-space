@@ -101,6 +101,7 @@ Empfänger haben. Seine Kennung steht in `AUFTRAG_TEST_KONTAKT_ID`, nie im Repo.
 |---|---|---|
 | `SALES_DB_URL`, `SALES_DB_SCHEMA` | wie die anderen Dienste; bedient werden nur `sales` und `sales_test` | – |
 | `LADEN_PRAEFIX` | der eigene Laden; nur dessen Aufträge werden übernommen | `sales` |
+| `AUFTRAGSBUCH_LADEN` | Pflicht: derselbe Wert wie `AUFTRAGSBUCH_LADEN` beim Gehirn; muss gleich `LADEN_PRAEFIX` sein | – |
 | `AUFTRAG_ARTEN_FREI` | freigeschaltete Arten, durch Komma getrennt; leer schaltet alles ab | `kontakt_finden` |
 | `AUFTRAG_TEST_KONTAKT_ID` | Kennung des einen Testkontakts für verändernde Arten | leer |
 | `POST_BESITZER` | Ladenbesitzer, mit dessen Augen die Zählarten sehen; wie bei sales-ui | leer |
@@ -115,6 +116,15 @@ braucht.
   läuft nie mit dem Laden `sales`: Beide Schemas benutzen dieselbe Datenbank-Rolle, und die Hüllen trennen
   nur nach dem Laden. Eine Testinstanz braucht deshalb einen eigenen `LADEN_PRAEFIX`. Passt es nicht,
   schreibt der Abholer den Grund ins Protokoll und fasst keinen Auftrag an.
+- **Start nur, wenn der Laden dem des Gehirns gleicht.** `AUFTRAGSBUCH_LADEN` ist Pflicht und muss gleich
+  `LADEN_PRAEFIX` sein. Fehlt er oder weicht er ab, meldet der Abholer „AUFTRAGSBUCH_LADEN fehlt" oder
+  „LADEN_PRAEFIX und AUFTRAGSBUCH_LADEN sind verschieden" und fasst keinen Auftrag an; die Meldung nennt keinen
+  Wert. Ohne diesen Schutz liefe jeder Auftrag an Sales still ab. Die Startzeile sagt bei Gleichheit
+  `auftragsbuch_laden=gleich`. Der Abholer liest den Wert aus seiner Umgebung, nicht aus dem Auftragsbuch:
+  Die Rolle von Sales darf dort nur die drei Hüllen aufrufen.
+- **Fehlergründe** sind feste Sätze (`GRUND_*` in `auftrag_abholer.py`), bei Form- und Ausführungsfehlern mit
+  einem Zusatz nach „:" (Feldpfad oder Name der Ausnahme, nie ein Wert). Das Gehirn zeigt nur Gründe aus seiner
+  Positivliste; ein neuer Grund muss dort eingetragen werden.
 - **Ablaufen hängt am Auftrag-Boten.** `auftrag.ablaufen()` ruft nur der Dienst `auftrag-bote` auf. Steht
   er, wird kein Auftrag nach seiner Frist `abgelaufen`, auch keiner an Sales. Der Abholer selbst übernimmt
   einen Auftrag nach Fristende nicht mehr, er bleibt dann `offen` liegen.
@@ -171,6 +181,7 @@ im Auftragsbuch kein Auftrag an Sales entstehen kann.
          - SALES_DB_SCHEMA=${SALES_DB_SCHEMA:-sales}
          - TZ=${TZ:-Europe/Berlin}
          - LADEN_PRAEFIX=${LADEN_PRAEFIX:-sales}
+         - AUFTRAGSBUCH_LADEN=${AUFTRAGSBUCH_LADEN:?gleich dem Wert beim Gehirn}
          - AUFTRAG_ARTEN_FREI=${AUFTRAG_ARTEN_FREI:-kontakt_finden}
          - AUFTRAG_TEST_KONTAKT_ID=${AUFTRAG_TEST_KONTAKT_ID:-}
          - POST_BESITZER=${POST_BESITZER:-}
@@ -187,7 +198,9 @@ im Auftragsbuch kein Auftrag an Sales entstehen kann.
 4. **Start prüfen:** Die erste Protokollzeile nennt Schema, Laden, freigeschaltete Arten und je Art die
    ersten acht Zeichen der Prüfsumme. Diese Prüfsumme mit dem Stand in vibemind-os vergleichen.
    Der Laden muss auf beiden Seiten gleich sein: `LADEN_PRAEFIX` hier und `AUFTRAGSBUCH_LADEN` beim Gehirn.
-   Weicht er ab, holt der Abholer nichts ab, und der Auftrag läuft still ab. Keine Seite prüft das selbst.
+   Dafür bekommt der Abholer `AUFTRAGSBUCH_LADEN` mit dem Wert des Gehirns und startet nur bei Gleichheit
+   (Startzeile `auftragsbuch_laden=gleich`). Dass dieser Wert wirklich der des Gehirns ist, prüft der Abholer
+   nicht; beim Eintragen den Wert aus der Umgebung des Gehirns übernehmen.
 5. **Freischalten im Auftragsbuch** (Schritt der VibeMind-Seite, nicht dieses Repos): eine Zeile in
    `auftrag.brain_arten` für `('sales', 'kontakt_finden', 1)`, dazu die Art im Vertrag und im Verzeichnis
    von vibemind-os. Erst danach kann das Gehirn einen Auftrag an Sales anlegen.
