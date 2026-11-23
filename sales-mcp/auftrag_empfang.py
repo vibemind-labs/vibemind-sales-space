@@ -1,0 +1,32 @@
+"""Duenne DB-Schicht fuer Auftraege, die Sales EMPFAENGT (Schema `auftrag`, db/auftrag-empfang.sql).
+
+Gegenstueck zu auftrag_buch.py (dort ist Sales Absender). sales_app darf nur die drei Huellen
+`auftrag.sales_empfang_*` aufrufen; jede fasst nur Auftraege mit an = 'sales' und von = 'brain' an.
+`q` wird uebergeben, damit die Tests ohne Datenbank laufen.
+"""
+from __future__ import annotations
+
+import json
+
+# Wie lange ein uebernommener Auftrag als vergeben gilt, bevor ein zweiter Versuch ihn nehmen darf.
+LEIHDAUER = "2 minutes"
+FEHLER_MAXLAENGE = 300
+
+
+def naechster(q) -> dict | None:
+    """Aeltesten offenen Auftrag an Sales uebernehmen (offen -> in_arbeit); None, wenn keiner wartet."""
+    zeilen = q("select auftrag.sales_empfang_naechster(%s::interval) as a", (LEIHDAUER,))
+    return zeilen[0]["a"] if zeilen and zeilen[0]["a"] else None
+
+
+def abschliessen(q, aid: str, ergebnis: dict) -> bool:
+    """in_arbeit -> fertig mit Ergebnis. False, wenn der Auftrag nicht mehr in Arbeit ist."""
+    z = q("select auftrag.sales_empfang_abschliessen(%s::uuid, %s::jsonb) as ok",
+          (aid, json.dumps(ergebnis, ensure_ascii=False)))
+    return bool(z and z[0]["ok"])
+
+
+def fehler(q, aid: str, grund: str) -> bool:
+    """in_arbeit -> fehler mit kurzem Grund (nie mit Werten aus der Eingabe)."""
+    z = q("select auftrag.sales_empfang_fehler(%s::uuid, %s) as ok", (aid, grund[:FEHLER_MAXLAENGE]))
+    return bool(z and z[0]["ok"])
