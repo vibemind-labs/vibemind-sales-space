@@ -4084,7 +4084,9 @@ async def inbox(request):
 
     if ui_freigabe_bewerbung.sichtbar(modul):
         async def bewerbungen():
-            return await ui_freigabe_bewerbung.abschnitt(modul, request, verlauf=False)
+            # Unter den Karten die Liste "Versendet" (23.11.2026): was raus ist.
+            return (await ui_freigabe_bewerbung.abschnitt(modul, request, verlauf=False)
+                    + await ui_freigabe_bewerbung.versendet_abschnitt(modul))
         reiter["bewerbungen"] = [unter(None, "Bewerbungen",
                                        lambda: ui_freigabe_bewerbung.anzahl_offen(modul),
                                        bewerbungen)]
