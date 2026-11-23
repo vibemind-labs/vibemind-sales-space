@@ -34,6 +34,11 @@ Er steht auch da, wenn die Kartenliste ausfällt - die Bremse gerade dann. "Lös
 raus und verlangt wie Freigeben den Bestätigungshaken. Fällt der Tag einer "bereit"-Zeit nicht auf heute, steht
 das Datum dabei.
 
+Liste "Versendet" (Felix 23.11.2026: "versandte Bewerbungen fehlen mir"): Im Reiter Bewerbungen steht unter den
+Karten alles, was raus ist (`GET /bewerbungen?status=versendet`), das zuletzt Versendete zuerst - je Zeile wann,
+auf welchem Weg (per Mail an ..., übers Portal, Versand unklar), Anschreiben und Anzeige. Fällt nur diese Liste
+aus (auch eine ältere Zentrale ohne `versendet`), steht dort ein Hinweis; war die Zentrale eben weg, fehlt sie.
+
 Wie der Rest von sales-ui: kein JavaScript, CSRF-Marke in jedem Formular, das
 Anschreiben-PDF nur verlinkt (eigene Datei-Richtlinie, nie gerahmt). Die Texte
 der Zentrale sind bereinigt, aber nicht HTML-maskiert: jede Ausgabe laeuft
@@ -46,7 +51,7 @@ import logging
 import math
 import re
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from functools import partial
 
 from starlette.concurrency import run_in_threadpool
@@ -95,6 +100,10 @@ ADRESSE_MAX = 254
 
 _OFFEN = "/bewerbungen?status=offen"
 _ENTSCHIEDEN = "/bewerbungen?status=entschieden"
+_VERSENDET = "/bewerbungen?status=versendet"
+_VERSENDET_NICHT_LESBAR = "Die Liste ist gerade nicht lesbar."
+# Ein Versanddatum ohne Uhrzeit (importierte Altbewerbung).
+_TAG = re.compile(r"\d{4}-\d{2}-\d{2}")
 _LAUF = "/laeufe/aktuell"
 _NOT_AUS = "/not-aus"
 # Der Not-Aus aendert nur einen Schalter in der Zentrale (kein Archivieren): wie "Neuer Lauf".
@@ -1109,6 +1118,55 @@ def _verlauf_zeile(ui, v: dict) -> str:
     teile.append(f"vor {e(_vor(v.get('am')))}")
     return (f'<div class="karte"><b>{e(v.get("firma"))} – {e(v.get("rolle"))}</b> '
             f'<span class="meta">{" · ".join(teile)}</span>{zusatz}</div>')
+
+
+def _versendet_am(ui, wert) -> str:
+    """Wann sie rausging: ein Zeitpunkt in Ortszeit, ein Tag ohne Uhrzeit (Altbewerbung) als TT.MM.JJJJ;
+    maskiert wie `_erfasst_am`."""
+    if isinstance(wert, str) and _TAG.fullmatch(wert.strip()):
+        try:
+            return date.fromisoformat(wert.strip()).strftime("%d.%m.%Y")
+        except ValueError:
+            pass
+    return _erfasst_am(ui, wert)
+
+
+def _versendet_zeile(ui, v: dict) -> str:
+    """Eine Zeile der Liste "Versendet": Firma, Rolle, wann, auf welchem Weg, Anschreiben und Anzeige."""
+    e = ui._e
+    an = _nur_text(v.get("versand_an"))
+    if v.get("ausgang") == "unklar":
+        weg = UNKLAR_VERSAND + (f" (an {e(an)})" if an else "")
+    elif v.get("kanal") == "email":
+        weg = f"per Mail an {e(an)}" if an else "per Mail"
+    elif v.get("kanal") == "portal":
+        weg = "übers Portal"
+    else:
+        weg = "Versendet"
+    teile = [x for x in (_versendet_am(ui, v.get("am")), weg) if x]
+    return (f'<div class="karte"><b>{e(v.get("firma"))} – {e(v.get("rolle"))}</b> '
+            f'<span class="meta">{" · ".join(teile)}</span>'
+            f'{_von_hand_links(ui, v, _nr(v.get("fassung")))}</div>')
+
+
+async def versendet_abschnitt(ui) -> str:
+    """Die Liste "Versendet" im Reiter Bewerbungen, in der Reihenfolge der Zentrale. "" ohne Abschnitt (nicht
+    sichtbar) und wenn die Zentrale eben nicht erreichbar war - das sagt schon der Abschnitt darueber. Scheitert
+    nur diese Liste, steht ein Hinweis da; die Seite bleibt."""
+    if not sichtbar(ui) or _speicher.frisch_fehler():
+        return ""
+    kopf = '<section class="block" id="versendet"><h2>Versendet'
+    try:
+        liste = _dicts(await _lesen(_VERSENDET))
+        zeilen = "".join(_versendet_zeile(ui, v) for v in liste)
+    except bewerbung_pult.PultFehler as f:
+        LOG.warning("Bewerbungen: Liste Versendet nicht lesbar: %s (%r)", f.art, f.grund)
+        return f'{kopf}</h2><p class="meta">{_VERSENDET_NICHT_LESBAR}</p></section>'
+    except Exception:  # noqa: BLE001 - die Seite darf daran nie scheitern
+        LOG.warning("Bewerbungen: Liste Versendet nicht lesbar oder nicht darstellbar", exc_info=True)
+        return f'{kopf}</h2><p class="meta">{_VERSENDET_NICHT_LESBAR}</p></section>'
+    inhalt = zeilen or '<p class="meta">Noch keine Bewerbung versendet.</p>'
+    return f'{kopf} <span class="zaehler">{len(liste)}</span></h2>{inhalt}</section>'
 
 
 def _ganz(wert) -> bool:

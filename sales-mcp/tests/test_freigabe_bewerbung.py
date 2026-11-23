@@ -41,6 +41,8 @@ BRIEF = ("Sehr geehrte Frau Muster,\n\nhiermit bewerbe ich mich als Data Enginee
          "Mit freundlichen Grüßen\nFelix")
 OFFEN = "/bewerbungen?status=offen"
 ENTSCHIEDEN = "/bewerbungen?status=entschieden"
+# Liste "Versendet" (23.11.2026): alles, was raus ist, im Reiter Bewerbungen.
+VERSENDET = "/bewerbungen?status=versendet"
 BOESE = "<script>x</script>"
 BOESE2 = '"><img onerror=1>'
 LAUF_AKTUELL = "/laeufe/aktuell"
@@ -108,11 +110,13 @@ class Falsch:
         self.fehler_pdf = None      # nur das PDF
         self.fehler_lauf = None     # nur GET /laeufe/aktuell
         self.fehler_not_aus = None  # nur GET /not-aus
+        self.fehler_versendet = None  # nur GET ?status=versendet
         self.not_aus = dict(NOT_AUS_AUS)      # der Not-Aus in der Zentrale (A2); POST aendert ihn
         self.antwort_not_aus = None           # erzwingt eine bestimmte Antwort auf POST /not-aus
         self.uebersicht = uebersicht()
         self.karten = [karte()]
         self.verlauf = []
+        self.versendet = []
         self.pdf = (b"%PDF-1.7 Anschreiben", "application/pdf")
         # Portal-Abgabe (Task 12): Bild und Unterlagen des Laufs, Antworten der Portal-Routen.
         self.bild = (b"\x89PNG\r\n\x1a\nBILD", "image/png")
@@ -162,6 +166,10 @@ class Falsch:
             return {"bewerbungen": self.karten}
         if pfad == ENTSCHIEDEN:
             return {"bewerbungen": self.verlauf}
+        if pfad == VERSENDET:
+            if self.fehler_versendet:
+                raise self.fehler_versendet
+            return {"bewerbungen": self.versendet}
         if pfad == NOT_AUS:
             if self.fehler_not_aus:
                 raise self.fehler_not_aus
@@ -1777,8 +1785,10 @@ def test_ausfall_von_laeufe_aktuell_sperrt_den_abschnitt_nicht(client, falsch):
 def test_lauf_wird_nach_der_liste_gelesen(client, falsch):
     client.get(SEITE)
     gets = [p for m, p, _ in falsch.aufrufe if m == "GET"]
-    assert gets == [OFFEN, ENTSCHIEDEN, NOT_AUS, LAUF_AKTUELL]
+    # Die Liste "Versendet" (23.11.2026) steht unter den Karten und wird zuletzt gelesen.
+    assert gets == [OFFEN, ENTSCHIEDEN, NOT_AUS, LAUF_AKTUELL, VERSENDET]
     assert ("GET", LAUF_AKTUELL, ui_freigabe_bewerbung.LESE_ZEITLIMIT_S) in falsch.zeitlimits
+    assert ("GET", VERSENDET, ui_freigabe_bewerbung.LESE_ZEITLIMIT_S) in falsch.zeitlimits
 
 
 # --- Pruefnotiz und offene Fragen auf der Karte ------------------------------------------------
@@ -3926,3 +3936,116 @@ def test_verlauf_abbruch_ohne_gueltigen_code(client, falsch, status):
     falsch.verlauf = [verlauf(entscheidung="reject", grund="anzeige_offline", anzeige_status=status)]
     s = _abschnitt(client)
     assert "Abgebrochen – Anzeige offline" in s and "Abgebrochen – Anzeige offline (" not in s
+
+
+# --- Versendet (23.11.2026) -------------------------------------------------------------------
+# Felix: "versandte Bewerbungen fehlen mir" - im Reiter Bewerbungen steht unter den Karten,
+# was raus ist (GET /bewerbungen?status=versendet der Zentrale), das zuletzt Versendete zuerst.
+
+
+def raus(**kw):
+    v = {"application_id": "bw-raus-1", "firma": "XALT GmbH", "rolle": "Berater", "kanal": "portal",
+         "ausgang": "versendet", "am": "2026-11-13T15:17:00+00:00", "fassung": 1, "versand_an": None,
+         "anzeige_url": "https://jobs.example.org/xalt"}
+    v.update(kw)
+    return v
+
+
+def _versendet(c, pfad=SEITE) -> str:
+    r = c.get(pfad)
+    assert r.status_code == 200
+    if '<section class="block" id="versendet">' not in r.text:
+        return ""
+    s = r.text[r.text.index('<section class="block" id="versendet">'):]
+    return s[:s.index("</section>")]
+
+
+def test_versendet_steht_im_reiter_bewerbungen(client, falsch):
+    falsch.versendet = [
+        raus(application_id="bw-raus-2", firma="Recare", rolle="Engineer", kanal="email",
+             versand_an="hr@recare.example", am="2026-11-23T09:05:00+00:00", fassung=2),
+        raus(),
+    ]
+    s = _versendet(client)
+    assert '<h2>Versendet <span class="zaehler">2</span></h2>' in s
+    assert s.index("Recare –") < s.index("XALT GmbH –")              # wie geliefert: neueste zuerst
+    mail = _zeile(s, "Recare")
+    assert "23.11.2026 10:05" in mail and "per Mail an hr@recare.example" in mail
+    assert ('<a href="/freigaben/bewerbung/bw-raus-2/anschreiben.pdf?fassung=2" target="_blank" '
+            'rel="noopener noreferrer">Anschreiben (PDF)</a>') in mail
+    portal = _zeile(s, "XALT GmbH")
+    assert "13.11.2026 16:17" in portal and "übers Portal" in portal
+    assert '<a href="https://jobs.example.org/xalt" target="_blank" rel="noopener noreferrer">' in portal
+    assert ("GET", VERSENDET, None) in falsch.aufrufe
+    # Die offenen Karten stehen weiter darueber.
+    seite = client.get(SEITE).text
+    assert seite.index('id="bewerbungen"') < seite.index('id="versendet"')
+
+
+def test_versendet_unklar_und_altbewerbung(client, falsch):
+    falsch.versendet = [
+        raus(application_id="bw-unklar", firma="Unklar AG", kanal="email", ausgang="unklar",
+             versand_an="jobs@unklar.example"),
+        raus(application_id="bw-alt-1", firma="Alt GmbH", kanal="email", am="2026-10-01",
+             fassung=None, anzeige_url=None),
+    ]
+    s = _versendet(client)
+    unklar = _zeile(s, "Unklar AG")
+    assert ui_freigabe_bewerbung.UNKLAR_VERSAND in unklar and "jobs@unklar.example" in unklar
+    alt = _zeile(s, "Alt GmbH")
+    assert "01.10.2026" in alt and "per Mail" in alt               # ein Tag ohne Uhrzeit
+    assert "anschreiben.pdf" not in alt and "Anzeige" not in alt     # keine Fassung, keine Anzeige
+
+
+def test_versendet_leer(client, falsch):
+    s = _versendet(client)
+    assert '<h2>Versendet <span class="zaehler">0</span></h2>' in s
+    assert "Noch keine Bewerbung versendet." in s
+
+
+def test_versendet_maskiert_feindlichen_text(client, falsch):                  # Review Focus 5
+    falsch.versendet = [raus(firma=BOESE, rolle=BOESE2, kanal="email", versand_an=BOESE2,
+                             am=BOESE, anzeige_url="javascript:alert(1)", application_id="bw/../x")]
+    seite = client.get(SEITE).text
+    s = _versendet(client)
+    assert BOESE not in seite and BOESE2 not in seite
+    assert html.escape(BOESE) in s
+    assert "javascript:" not in s and "Anzeige" not in s
+    assert "/freigaben/bewerbung/bw%2F..%2Fx/anschreiben.pdf?fassung=1" in s
+
+
+@pytest.mark.parametrize("fehler", [PultFehler("nicht_erreichbar", "URLError"),
+                                    PultFehler("abgelehnt", "422"),           # aeltere Zentrale
+                                    PultFehler("unbekannt", "Antwort ohne Liste")])
+def test_versendet_faellt_aus_die_seite_bleibt(client, falsch, fehler):
+    falsch.fehler_versendet = fehler
+    r = client.get(SEITE)
+    assert r.status_code == 200
+    assert 'id="karte-' in r.text                                   # die Karten stehen
+    s = _versendet(client)
+    assert "Die Liste ist gerade nicht lesbar." in s
+    assert "URLError" not in s and "422" not in s
+
+
+def test_versendet_kaputter_eintrag_kostet_nur_die_liste(client, falsch):
+    falsch.versendet = [raus(), "kein Eintrag", raus(application_id="bw-raus-3", firma="Drei")]
+    s = _versendet(client)
+    assert "XALT GmbH" in s and "Drei" in s
+    assert '<span class="zaehler">2</span>' in s
+
+
+def test_versendet_nicht_ohne_zentrale_und_nicht_fuer_lesen(client_lesen, falsch):
+    assert _versendet(client_lesen) == ""
+    assert ("GET", VERSENDET, None) not in falsch.aufrufe
+
+
+def test_versendet_wird_nicht_gelesen_wenn_die_zentrale_eben_weg_war(client, falsch):
+    falsch.fehler = PultFehler("nicht_erreichbar", "URLError")
+    assert _versendet(client) == ""
+    assert ("GET", VERSENDET, None) not in falsch.aufrufe
+
+
+def test_versendet_nur_im_reiter_bewerbungen(client, falsch):
+    falsch.versendet = [raus()]
+    assert 'id="versendet"' not in client.get("/monitoring/verlauf").text
+    assert 'id="versendet"' not in client.get("/freigaben?tab=nachrichten").text
