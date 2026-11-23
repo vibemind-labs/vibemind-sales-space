@@ -153,10 +153,10 @@ def bearbeiten(q, a: dict, arten: dict, *, frei: set[str], testkontakt: str, ver
         except auftrag_vertrag.FormFehler as e:
             grund = f"{GRUND_ERGEBNIS}: {e}"
     if grund is not None:
-        auftrag_empfang.fehler(q, aid, grund)
+        auftrag_empfang.fehler(q, aid, grund, laden())
         LOG.warning("Auftrag %s art=%s: fehler (%s)", kurz, str(a.get("art"))[:40], grund.split(":")[0])
         return False
-    if not auftrag_empfang.abschliessen(q, aid, ergebnis):
+    if not auftrag_empfang.abschliessen(q, aid, ergebnis, laden()):
         LOG.warning("Auftrag %s art=%s: Abschluss nicht angenommen (nicht mehr in Arbeit)", kurz, art.art)
         return False
     LOG.info("Auftrag %s art=%s: fertig", kurz, art.art)

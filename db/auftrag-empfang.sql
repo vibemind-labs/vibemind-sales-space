@@ -6,8 +6,8 @@
 --
 -- Drei SECURITY-DEFINER-Huellen fuer die Rolle sales_app (sales-mcp/auftrag_empfang.py):
 --   sales_empfang_naechster(laden, leihdauer)  offen -> in_arbeit, genau EIN Mal je Auftrag
---   sales_empfang_abschliessen(id, ergebnis)   in_arbeit -> fertig
---   sales_empfang_fehler(id, grund)            in_arbeit -> fehler
+--   sales_empfang_abschliessen(id, ergebnis, laden)   in_arbeit -> fertig
+--   sales_empfang_fehler(id, grund, laden)            in_arbeit -> fehler
 -- Jede fasst nur Zeilen mit an = 'sales' UND von = 'brain' an. Auftraege, die Sales selbst gibt
 -- (von = 'sales'), und Auftraege an andere Empfaenger bleiben unerreichbar.
 --
@@ -58,36 +58,44 @@ BEGIN
                               'eingabe', a.eingabe, 'plan_id', a.plan_id, 'frist_bis', a.frist_bis);
 END $$;
 
-CREATE OR REPLACE FUNCTION auftrag.sales_empfang_abschliessen(p_id uuid, p_ergebnis jsonb) RETURNS boolean
+-- Nur im eigenen Laden und nur, solange die Leihdauer laeuft: wer zu spaet kommt, schliesst nichts ab.
+CREATE OR REPLACE FUNCTION auftrag.sales_empfang_abschliessen(p_id uuid, p_ergebnis jsonb, p_laden text)
+    RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = auftrag, pg_temp AS $$
 BEGIN
+    IF coalesce(btrim(p_laden), '') = '' THEN RETURN false; END IF;
     IF jsonb_typeof(p_ergebnis) IS DISTINCT FROM 'object' THEN RETURN false; END IF;
     IF pg_column_size(p_ergebnis) > 65536 THEN RETURN false; END IF;
     UPDATE auftrag.auftraege
        SET stand = 'fertig', ergebnis = p_ergebnis, vergeben_bis = NULL, geaendert = now(),
            verlauf = array_append(verlauf, jsonb_build_object('stand', 'fertig', 'zeit', now()))
-     WHERE id = p_id AND an = 'sales' AND von = 'brain' AND stand = 'in_arbeit' AND frist_bis > now();
+     WHERE id = p_id AND an = 'sales' AND von = 'brain' AND laden = p_laden
+       AND stand = 'in_arbeit' AND frist_bis > now() AND vergeben_bis >= now();
     RETURN FOUND;
 END $$;
 
-CREATE OR REPLACE FUNCTION auftrag.sales_empfang_fehler(p_id uuid, p_fehler text) RETURNS boolean
+CREATE OR REPLACE FUNCTION auftrag.sales_empfang_fehler(p_id uuid, p_fehler text, p_laden text) RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = auftrag, pg_temp AS $$
 DECLARE v_fehler text := left(coalesce(nullif(btrim(p_fehler), ''), 'Fehler ohne Angabe'), 300);
 BEGIN
+    IF coalesce(btrim(p_laden), '') = '' THEN RETURN false; END IF;
     UPDATE auftrag.auftraege
        SET stand = 'fehler', fehler = v_fehler, vergeben_bis = NULL, geaendert = now(),
            verlauf = array_append(verlauf, jsonb_build_object('stand', 'fehler', 'zeit', now(), 'fehler', v_fehler))
-     WHERE id = p_id AND an = 'sales' AND von = 'brain' AND stand = 'in_arbeit';
+     WHERE id = p_id AND an = 'sales' AND von = 'brain' AND laden = p_laden AND stand = 'in_arbeit';
     RETURN FOUND;
 END $$;
 
 -- Neue Funktionen sind fuer PUBLIC ausfuehrbar: zuerst alles entziehen, dann nur sales_app.
+-- Der Laden kommt vom Aufrufer. Das traegt nur, solange ausschliesslich sales_app (der Basis-Laden) diese
+-- Huellen ausfuehren darf; weitere Laeden haben im Schema `auftrag` keine Rechte (wie in 096). Bekommt je
+-- ein zweiter Laden Zugang, muss der Laden hier aus der Rolle abgeleitet werden statt uebergeben.
 REVOKE ALL ON FUNCTION auftrag.sales_empfang_naechster(text, interval) FROM PUBLIC;
-REVOKE ALL ON FUNCTION auftrag.sales_empfang_abschliessen(uuid, jsonb) FROM PUBLIC;
-REVOKE ALL ON FUNCTION auftrag.sales_empfang_fehler(uuid, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION auftrag.sales_empfang_abschliessen(uuid, jsonb, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION auftrag.sales_empfang_fehler(uuid, text, text) FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION auftrag.sales_empfang_naechster(text, interval) TO sales_app;
-GRANT EXECUTE ON FUNCTION auftrag.sales_empfang_abschliessen(uuid, jsonb) TO sales_app;
-GRANT EXECUTE ON FUNCTION auftrag.sales_empfang_fehler(uuid, text) TO sales_app;
+GRANT EXECUTE ON FUNCTION auftrag.sales_empfang_abschliessen(uuid, jsonb, text) TO sales_app;
+GRANT EXECUTE ON FUNCTION auftrag.sales_empfang_fehler(uuid, text, text) TO sales_app;
 
 COMMIT;

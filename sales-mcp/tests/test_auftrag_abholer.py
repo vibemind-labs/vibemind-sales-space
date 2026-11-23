@@ -34,12 +34,16 @@ class Buch:
         self.fertig: dict[str, dict] = {}
         self.fehler: dict[str, str] = {}
         self.sql: list[str] = []
+        self.laeden: list[str] = []
         self.abschluss_ok = True
 
     def q(self, sql, params=()):
         self.sql.append(sql)
+        if "sales_empfang_abschliessen" in sql or "sales_empfang_fehler" in sql:
+            self.laeden.append(params[2])
         if "sales_empfang_naechster" in sql:
             self.laden = params[0]
+            self.laeden.append(params[0])
             return [{"a": self.offen.pop(0) if self.offen else None}]
         if "sales_empfang_abschliessen" in sql:
             if self.abschluss_ok:
@@ -69,8 +73,9 @@ def test_empfang_ruft_nur_die_drei_huellen():
     buch = Buch(auftrag())
     assert auftrag_empfang.naechster(buch.q, "sales")["id"] == AID
     assert auftrag_empfang.naechster(buch.q, "sales") is None
-    assert auftrag_empfang.abschliessen(buch.q, AID, {"treffer": [], "anzahl": 0}) is True
-    assert auftrag_empfang.fehler(buch.q, AID, "x" * 500) is True
+    assert auftrag_empfang.abschliessen(buch.q, AID, {"treffer": [], "anzahl": 0}, "sales") is True
+    assert auftrag_empfang.fehler(buch.q, AID, "x" * 500, "sales") is True
+    assert buch.laeden == ["sales", "sales", "sales", "sales"]     # jede Huelle bekommt den Laden
     assert len(buch.fehler[AID]) <= 300
     assert all("auftrag.sales_empfang_" in s for s in buch.sql)
 

@@ -142,6 +142,9 @@ Ablehnung abbrechen). Dieses Skript gibt es noch nicht.
 
 ## Offen
 
+- Der Laden kommt beim Aufruf der Hüllen vom Abholer selbst. Das trägt, solange nur die Rolle des
+  Basis-Ladens die Hüllen ausführen darf. Bekommt ein zweiter Laden Zugang zum Auftragsbuch, muss der Laden
+  in der Datenbank aus der Rolle abgeleitet werden. Ob `sales` und `sales_test` dieselbe Rolle benutzen, ist nicht geprüft.
 - Herzschlag und Überwachung des Abholers (`deploy/smoke.sh`, `deploy/wache.sh`) fehlen.
 - Der lesende Zugang für die Nachprüfung `beleg` fehlt.
 - `post_pruefen` Version 2 mit Mustern für `link` und `entwurf_id`, danach der Ausführer.

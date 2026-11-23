@@ -10,8 +10,8 @@ import auftrag_empfang
 
 WURZEL = Path(__file__).resolve().parents[2]
 SQL = (WURZEL / "db" / "auftrag-empfang.sql").read_text(encoding="utf-8")
-HUELLEN = {"sales_empfang_naechster": "text, interval", "sales_empfang_abschliessen": "uuid, jsonb",
-           "sales_empfang_fehler": "uuid, text"}
+HUELLEN = {"sales_empfang_naechster": "text, interval", "sales_empfang_abschliessen": "uuid, jsonb, text",
+           "sales_empfang_fehler": "uuid, text, text"}
 
 
 def _koerper(name: str) -> str:
@@ -32,6 +32,11 @@ def test_jede_huelle_fasst_nur_auftraege_des_gehirns_an_sales_an():
             if "WHERE id = a.id" in anweisung:        # die soeben unter Sperre gewaehlte Zeile
                 continue
             assert "an = 'sales' AND von = 'brain'" in anweisung, name
+            assert "laden = p_laden" in anweisung, name          # nie ueber den eigenen Laden hinaus
+
+
+def test_abschluss_nur_innerhalb_der_leihdauer():
+    assert "vergeben_bis >= now()" in _koerper("sales_empfang_abschliessen")
 
 
 def test_kein_zweiter_versuch():
@@ -62,8 +67,8 @@ def test_python_schicht_ruft_dieselben_signaturen():
         rufe.append((sql, params))
         return [{"a": None, "ok": True}]
     auftrag_empfang.naechster(q, "sales")
-    auftrag_empfang.abschliessen(q, "0123abcd-0000-4000-8000-000000000001", {})
-    auftrag_empfang.fehler(q, "0123abcd-0000-4000-8000-000000000001", "x")
+    auftrag_empfang.abschliessen(q, "0123abcd-0000-4000-8000-000000000001", {}, "sales")
+    auftrag_empfang.fehler(q, "0123abcd-0000-4000-8000-000000000001", "x", "sales")
     for (sql, params), (name, signatur) in zip(rufe, HUELLEN.items()):
         assert f"auftrag.{name}(" in sql
         assert len(params) == len(signatur.split(","))
