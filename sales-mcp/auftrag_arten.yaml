@@ -1,0 +1,113 @@
+# Auftragsarten, die Sales als EMPFAENGER im Auftragsbuch annimmt (an = sales, von = brain).
+#
+# Dieselbe Form wie der Abschnitt `auftragsarten` im Vertrag von vibemind-os
+# (spaces/_contract/sales.contract.yaml). post_pruefen ist von dort woertlich uebernommen;
+# tests/test_auftrag_vertrag.py haelt die Pruefsumme fest. Wer hier eine Form aendert, zaehlt
+# `version` hoch und zieht den Vertrag in vibemind-os nach.
+#
+# Was hier steht, ist bekannt, aber nicht freigeschaltet: Welche Arten der Abholer ausfuehrt,
+# sagt AUFTRAG_ARTEN_FREI (auftrag_abholer.py).
+#
+# Titel duerfen den Namen des Kontakts und den Betreff nennen. Mail-Text, Adressen und Nummern
+# stehen nie in einem Feld.
+
+auftragsarten:
+  - art: post_pruefen
+    version: 1
+    veraendert: true
+    frist_min: 15
+    nachpruefung: beleg
+    beschreibung: >-
+      Der Sales-Agent prüft die Geschäftspost von heute und meldet die Punkte,
+      um die sich der Betreiber heute kümmern muss. Auf Wunsch legt er dazu
+      Antwortentwürfe an; diese warten immer auf die Freigabe des Betreibers
+      und werden nie von selbst gesendet. Gemeldet werden nur Kennungen,
+      Titel, Fristen und Links, nie der Mail-Text.
+    eingabe:
+      type: object
+      additionalProperties: false
+      required: [zeitraum, entwuerfe_anlegen]
+      properties:
+        zeitraum:
+          type: string
+          enum: [heute]
+        entwuerfe_anlegen:
+          type: boolean
+    ergebnis:
+      type: object
+      additionalProperties: false
+      required: [faellig, anzahl_gelesen, kontakte_neu]
+      properties:
+        faellig:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [punkt_id, titel, frist, link, entwurf_id]
+            properties:
+              punkt_id:
+                type: string
+                pattern: "^[a-f0-9]{16}$"
+              titel:
+                type: string
+                maxLength: 200
+              frist:
+                type: [string, "null"]
+                pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              link:
+                type: string
+                maxLength: 500
+              entwurf_id:
+                type: [string, "null"]
+        anzahl_gelesen:
+          type: integer
+          minimum: 0
+        kontakte_neu:
+          type: integer
+          minimum: 0
+
+  - art: kontakt_finden
+    version: 1
+    veraendert: false
+    frist_min: 5
+    nachpruefung: form
+    beschreibung: >-
+      Sales sucht Kontakte, deren Name den Suchtext enthält, und meldet
+      höchstens zehn Treffer mit Kennung, Titel und Link in die
+      Sales-Oberfläche. Es wird nichts verändert. Gemeldet werden nie
+      Adressen oder Nummern.
+    eingabe:
+      type: object
+      additionalProperties: false
+      required: [suche]
+      properties:
+        suche:
+          type: string
+          minLength: 2
+          maxLength: 100
+    ergebnis:
+      type: object
+      additionalProperties: false
+      required: [treffer, anzahl]
+      properties:
+        treffer:
+          type: array
+          maxItems: 10
+          items:
+            type: object
+            additionalProperties: false
+            required: [kontakt_id, titel, link]
+            properties:
+              kontakt_id:
+                type: string
+                pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              titel:
+                type: string
+                maxLength: 200
+              link:
+                type: string
+                pattern: "^/kontakte/[0-9a-f-]{36}$"
+        anzahl:
+          type: integer
+          minimum: 0
+          maximum: 10
