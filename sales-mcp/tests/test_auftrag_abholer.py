@@ -39,6 +39,7 @@ class Buch:
     def q(self, sql, params=()):
         self.sql.append(sql)
         if "sales_empfang_naechster" in sql:
+            self.laden = params[0]
             return [{"a": self.offen.pop(0) if self.offen else None}]
         if "sales_empfang_abschliessen" in sql:
             if self.abschluss_ok:
@@ -66,8 +67,8 @@ def lauf(buch, **kw):
 
 def test_empfang_ruft_nur_die_drei_huellen():
     buch = Buch(auftrag())
-    assert auftrag_empfang.naechster(buch.q)["id"] == AID
-    assert auftrag_empfang.naechster(buch.q) is None
+    assert auftrag_empfang.naechster(buch.q, "sales")["id"] == AID
+    assert auftrag_empfang.naechster(buch.q, "sales") is None
     assert auftrag_empfang.abschliessen(buch.q, AID, {"treffer": [], "anzahl": 0}) is True
     assert auftrag_empfang.fehler(buch.q, AID, "x" * 500) is True
     assert len(buch.fehler[AID]) <= 300
@@ -181,6 +182,17 @@ def test_protokoll_nennt_nie_suchtext_oder_namen(caplog):
         lauf(buch)
     assert "Geheimsuche" not in caplog.text and "Geheimname" not in caplog.text
     assert AID[:8] in caplog.text
+
+
+def test_nur_auftraege_des_eigenen_ladens(monkeypatch):
+    buch = Buch(auftrag())
+    monkeypatch.delenv("LADEN_PRAEFIX", raising=False)
+    lauf(buch)
+    assert buch.laden == "sales"
+    buch = Buch(auftrag())
+    monkeypatch.setenv("LADEN_PRAEFIX", "zweiter")
+    lauf(buch)
+    assert buch.laden == "zweiter"
 
 
 def test_durchgang_nimmt_hoechstens_die_grenze():

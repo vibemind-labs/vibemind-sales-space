@@ -163,13 +163,18 @@ def bearbeiten(q, a: dict, arten: dict, *, frei: set[str], testkontakt: str, ver
     return True
 
 
+def laden() -> str:
+    """Der eigene Laden, wie ihn auftrag_bote bestimmt; nur dessen Auftraege werden uebernommen."""
+    return os.environ.get("LADEN_PRAEFIX", "").strip() or "sales"
+
+
 def durchgang(q, arten: dict, *, verborgen, frei: set[str] | None = None, testkontakt: str | None = None,
               hoechstens: int = HOECHSTENS_JE_DURCHGANG) -> dict:
     frei = arten_frei() if frei is None else frei
     testkontakt = os.environ.get("AUFTRAG_TEST_KONTAKT_ID", "") if testkontakt is None else testkontakt
     zaehler = {"fertig": 0, "fehler": 0}
     for _ in range(hoechstens):
-        a = auftrag_empfang.naechster(q)
+        a = auftrag_empfang.naechster(q, laden())
         if a is None:
             break
         try:
@@ -217,7 +222,7 @@ def main() -> int:
         return 0
     arten = auftrag_vertrag.lade()
     verborgen = verborgen_aus_server(server)
-    LOG.info("Start: schema=%s takt=%ds frei=%s arten=%s", server.SCHEMA, TAKT_S,
+    LOG.info("Start: schema=%s laden=%s takt=%ds frei=%s arten=%s", server.SCHEMA, laden(), TAKT_S,
              ",".join(sorted(arten_frei())) or "-",
              ",".join(f"{a.art}v{a.version}:{auftrag_vertrag.art_hash(a)[:8]}" for a in arten.values()))
     while not _STOPP.is_set():

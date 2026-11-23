@@ -8,14 +8,15 @@ from __future__ import annotations
 
 import json
 
-# Wie lange ein uebernommener Auftrag als vergeben gilt, bevor ein zweiter Versuch ihn nehmen darf.
+# Wie lange ein uebernommener Auftrag in Arbeit sein darf, bevor er als abgebrochen gilt (kein zweiter Versuch).
 LEIHDAUER = "2 minutes"
 FEHLER_MAXLAENGE = 300
 
 
-def naechster(q) -> dict | None:
-    """Aeltesten offenen Auftrag an Sales uebernehmen (offen -> in_arbeit); None, wenn keiner wartet."""
-    zeilen = q("select auftrag.sales_empfang_naechster(%s::interval) as a", (LEIHDAUER,))
+def naechster(q, laden: str) -> dict | None:
+    """Aeltesten offenen Auftrag an Sales in diesem Laden uebernehmen (offen -> in_arbeit); None, wenn
+    keiner wartet. Ein Auftrag wird genau einmal vergeben: bleibt er liegen, wird er `fehler`."""
+    zeilen = q("select auftrag.sales_empfang_naechster(%s, %s::interval) as a", (laden, LEIHDAUER))
     return zeilen[0]["a"] if zeilen and zeilen[0]["a"] else None
 
 
