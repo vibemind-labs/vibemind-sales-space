@@ -200,6 +200,22 @@ def test_nur_auftraege_des_eigenen_ladens(monkeypatch):
     assert buch.laden == "zweiter"
 
 
+@pytest.mark.parametrize("schema, laden, erlaubt", [
+    ("sales", "sales", True),
+    ("sales_test", "sales-test", True),
+    ("sales_test", "sales", False),        # die Testinstanz naehme sonst echte Auftraege weg (gleiche Rolle)
+    ("sales", "sales-test", False),        # und der Betrieb die der Testinstanz
+    ("sales", "zweiter", False),
+    ("sales_zweiter", "zweiter", False),   # weitere Laeden haben keinen Zugang zum Auftragsbuch
+    ("sales_test", "", False),
+])
+def test_start_nur_wenn_schema_und_laden_zusammenpassen(schema, laden, erlaubt):
+    grund = ab.start_hindernis(schema, laden)
+    assert (grund is None) is erlaubt
+    if not erlaubt:
+        assert schema in grund or "Laden" in grund
+
+
 def test_durchgang_nimmt_hoechstens_die_grenze():
     buch = Buch(*[auftrag(aid=f"0123abcd-0000-4000-8000-{i:012d}") for i in range(8)])
     assert lauf(buch, hoechstens=3) == {"fertig": 3, "fehler": 0}

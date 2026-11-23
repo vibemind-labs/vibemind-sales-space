@@ -77,6 +77,25 @@ Empfänger haben. Seine Kennung steht in `AUFTRAG_TEST_KONTAKT_ID`, nie im Repo.
 Der Gateway-Token ist Betreiber-Zugang. Er kommt erst in die Umgebung dieses Dienstes, wenn eine Art ihn
 braucht.
 
+## Betrieb
+
+- **Start nur bei passendem Schema und Laden.** `sales` läuft nur mit dem Laden `sales`. `sales_test`
+  läuft nie mit dem Laden `sales`: Beide Schemas benutzen dieselbe Datenbank-Rolle, und die Hüllen trennen
+  nur nach dem Laden. Eine Testinstanz braucht deshalb einen eigenen `LADEN_PRAEFIX`. Passt es nicht,
+  schreibt der Abholer den Grund ins Protokoll und fasst keinen Auftrag an.
+- **Ablaufen hängt am Auftrag-Boten.** `auftrag.ablaufen()` ruft nur der Dienst `auftrag-bote` auf. Steht
+  er, wird kein Auftrag nach seiner Frist `abgelaufen`, auch keiner an Sales. Der Abholer selbst übernimmt
+  einen Auftrag nach Fristende nicht mehr, er bleibt dann `offen` liegen.
+- **Ein Auftrag wird genau einmal übernommen.** Bleibt er länger als die Leihdauer in Arbeit, wird er beim
+  nächsten Durchgang `fehler`.
+
+## Wo die Migration liegt
+
+Die drei Hüllen ziehen unverändert in Namen und Signatur nach vibemind-os um, als
+`101_auftragsbuch_empfang.sql` neben den übrigen Dateien des Schemas `auftrag`. Eingespielt wird die Datei
+von dort. `db/auftrag-empfang.sql` in diesem Repo ist der Stand, gegen den der Abholer gebaut und getestet
+ist, und wird danach zum Verweis.
+
 ## Tests
 
 Ohne Datenbank und ohne Env-Datei, aus `sales-mcp/`:
@@ -144,8 +163,10 @@ Ablehnung abbrechen). Dieses Skript gibt es noch nicht.
 
 - Der Laden kommt beim Aufruf der Hüllen vom Abholer selbst. Das trägt, solange nur die Rolle des
   Basis-Ladens die Hüllen ausführen darf. Bekommt ein zweiter Laden Zugang zum Auftragsbuch, muss der Laden
-  in der Datenbank aus der Rolle abgeleitet werden. Ob `sales` und `sales_test` dieselbe Rolle benutzen, ist nicht geprüft.
+  in der Datenbank aus der Rolle abgeleitet werden. `sales` und `sales_test` benutzen dieselbe Rolle; dagegen
+  steht die Startprüfung (Abschnitt „Betrieb").
 - Herzschlag und Überwachung des Abholers (`deploy/smoke.sh`, `deploy/wache.sh`) fehlen.
 - Der lesende Zugang für die Nachprüfung `beleg` fehlt.
 - `post_pruefen` Version 2 mit Mustern für `link` und `entwurf_id`, danach der Ausführer.
-- Wohin die Migration endgültig gehört: Die übrigen Dateien des Schemas `auftrag` liegen in vibemind-os.
+- Die Freischaltung von `kontakt_finden` wartet auf zwei Dinge im Gehirn: die Sperre für Agenten, die
+  heute alle Werkzeug-Server sehen, und die Herkunftsregel samt Ergebnistext ohne Personendaten.

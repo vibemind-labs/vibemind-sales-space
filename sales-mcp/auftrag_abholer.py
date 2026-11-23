@@ -186,6 +186,23 @@ def durchgang(q, arten: dict, *, verborgen, frei: set[str] | None = None, testko
     return zaehler
 
 
+def start_hindernis(schema: str, eigener_laden: str) -> str | None:
+    """Grund, aus dem der Abholer nicht arbeiten darf; None, wenn Schema und Laden zusammenpassen.
+
+    `sales` und `sales_test` benutzen dieselbe Datenbank-Rolle. Die Huellen trennen nur nach dem Laden,
+    den der Abholer selbst nennt. Eine Testinstanz mit dem Laden `sales` naehme dem Betrieb deshalb echte
+    Auftraege weg und beantwortete sie aus den Testdaten."""
+    if schema not in ERLAUBTE_SCHEMAS:
+        return f"Schema {schema} wird nicht bedient (nur sales oder sales_test)"
+    if not eigener_laden:
+        return "Der Laden fehlt"
+    if schema == "sales" and eigener_laden != "sales":
+        return f"Schema {schema} gehoert zum Laden sales, nicht zu einem anderen Laden"
+    if schema == "sales_test" and eigener_laden == "sales":
+        return f"Schema {schema} darf nie mit dem Laden sales laufen (LADEN_PRAEFIX der Testinstanz setzen)"
+    return None
+
+
 def verborgen_aus_server(server):
     """Dieselben Regeln wie in den Werkzeugen: privat, archiviert oder zur Loeschung vermerkt."""
     def verborgen(enrichment) -> bool:
@@ -215,9 +232,10 @@ def main() -> int:
     _logging_einrichten()
     signal.signal(signal.SIGTERM, _stopp_anfordern)
     signal.signal(signal.SIGINT, _stopp_anfordern)
-    if server.SCHEMA not in ERLAUBTE_SCHEMAS:
+    hindernis = start_hindernis(server.SCHEMA, laden())
+    if hindernis:
         # Kein Exit: mit restart: unless-stopped wuerde daraus eine Neustartschleife.
-        LOG.error("Schema %s wird nicht bedient (nur sales oder sales_test) - der Abholer wartet.", server.SCHEMA)
+        LOG.error("%s - der Abholer wartet, ohne einen Auftrag anzufassen.", hindernis)
         _STOPP.wait()
         return 0
     arten = auftrag_vertrag.lade()
