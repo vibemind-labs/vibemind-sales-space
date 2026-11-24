@@ -8,6 +8,17 @@ Eine gesendete Antwort erbt vom beantworteten Eingang den Bereich und den Schutz
 Bezugsmail sensibel, wird es die Antwort auch (und ihr Inhalt wird geleert). Ebenso erbt
 die gesendete Kopie einer Mail an mich selbst von ihrem Eingangs-Zwilling. `sensibel`
 geht nie zurueck. Kein Modellaufruf; im Protokoll nie Inhalte, Adressen oder Message-IDs.
+
+Bewusst hingenommene Restrisiken (Security-Re-Reviews):
+- F3: Wer den From-Kopf mit einer eigenen Adresse faelscht und die Message-ID einer
+  gesendeten Mail wiederverwendet, gilt als Zwilling. Das macht nur strenger: der
+  gespeicherte Inhalt der gesendeten Mail kann geleert werden (wenn das Modell die
+  Faelschung sensibel einstuft), und die Faelschung steht in derselben Unterhaltung.
+  Lockern kann sie nichts - kein Bereich wird business, nichts wird lesbarer.
+- R1: Eine fremde Kopie der Message-ID einer gesendeten Mail wird nur erkannt, wenn
+  die echte gesendete Zeile gespeichert ist. Fehlt sie noch (noch nicht abgeholt) oder
+  fuer immer (vor dem Stichtag, im Gesendet-Ordner geloescht, vom Mailprogramm nie dort
+  abgelegt), zaehlt die Kopie als gewoehnliche Bezugsmail einer spaeteren Antwort.
 """
 from __future__ import annotations
 
@@ -106,8 +117,11 @@ def zuordnen(conn, mail_id) -> str:
 
 # Die Bezugsmail einer gesendeten Mail: In-Reply-To, sonst die letzte vorhandene aus
 # References; beim selben Besitzer, nie ueber einen Platzhalter. Bei mehreren Zeilen mit
-# derselben Message-ID gewinnt der Eingang, dann die kleinste id - ausser einem Eingang,
-# der eine eigene gesendete Message-ID ohne eigene Absenderadresse traegt (F1).
+# derselben Message-ID gewinnt immer die eigene gesendete Zeile, dann die kleinste id: eine
+# Eingangskopie dieser ID - auch mit (vielleicht gefaelschter) eigener Absenderadresse -
+# ist nie Bezug, solange die echte gesendete Zeile da ist. Ohne eigene Absenderadresse
+# zaehlt eine solche Kopie gar nicht (F1). Den Schutz einer echten Selbst-Kopie bekommt
+# die gesendete Zeile ueber den Zwilling und reicht ihn beim naechsten Lauf weiter.
 # Dazu der Zwilling (I2): dieselbe Mail als Eingang (Mail an mich selbst), gleicher
 # Besitzer, beide ohne Platzhalter, Absender eine eigene Kontoadresse (N1). Der Zwilling
 # macht nur strenger, nie lockerer: sensibel, wenn irgendein Zwilling ODER die Bezugsmail
@@ -145,7 +159,7 @@ from (
       and """ + _bezug_zulaessig_sql("b") + """
     order by (b.message_id = g2.in_reply_to) desc,
              array_position(g2.referenzen, b.message_id) desc nulls last,
-             (b.richtung = 'eingang') desc, b.id
+             (b.richtung = 'gesendet') desc, b.id
     limit 1) b on true
   where g2.richtung = 'gesendet'
     and (%(gid)s::uuid is null or g2.id = %(gid)s::uuid)

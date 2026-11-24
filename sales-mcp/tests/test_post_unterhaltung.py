@@ -436,16 +436,34 @@ def test_fremde_kopie_einer_gesendeten_id_ist_kein_bezug(falsch_vor_antwort):
     assert _unt(b) == _unt(a) and _unt(f) not in (_unt(a), _unt(b))
 
 
-def test_eigene_kopie_einer_gesendeten_id_bleibt_bezug():
-    """F1, Gegenprobe: die echte Kopie (Mail an mich selbst, eigene Adresse) zaehlt weiter."""
+def test_echte_selbstkopie_schuetzt_die_antwort_ueber_die_gesendete_zeile():
+    """F1, Gegenprobe: die echte Kopie (Mail an mich selbst, eigene Adresse) macht A
+    sensibel (Zwilling); B erbt es von A, der gesendeten Zeile - spaetestens im
+    naechsten Lauf, denn ein Lauf rechnet mit dem Stand vor seinem eigenen Update."""
     _konto()
     a = _roh("gmx-test", "a@x", richtung="gesendet", bereich="privat", text="A-Text")
     kopie = _roh("gmx-test", "a@x", tage=1, bereich="privat", sensibel=True, von=EIGEN)
     b = _roh("gmx-test", "b@x", tage=2, richtung="gesendet", in_reply_to="a@x",
              bereich="privat", text="B-Text")
     post_unterhaltung.nachziehen()
+    assert _zeile_von(a)["sensibel"] is True
+    post_unterhaltung.nachziehen()
     assert _zeile_von(b)["sensibel"] is True and _zeile_von(b)["text"] is None
     assert _unt(a) == _unt(kopie) == _unt(b)
+
+
+def test_gesendete_zeile_geht_als_bezug_vor_gefaelschter_eigener_kopie():
+    """Rangfolge: liegt die echte gesendete A vor, ist sie der Bezug - nie eine
+    Eingangskopie von A, auch nicht mit (gefaelschter) eigener Absenderadresse."""
+    _konto()
+    _roh("gmx-test", "a@x", richtung="gesendet", bereich="privat", text="A-Text")
+    _roh("gmx-test", "a@x", tage=1, bereich="business", von=EIGEN)
+    b = _roh("gmx-test", "b@x", tage=2, richtung="gesendet", in_reply_to="a@x",
+             referenzen=["a@x"], bereich="privat", text="B-Text")
+    post_unterhaltung.nachziehen()
+    post_unterhaltung.nachziehen()
+    z = _zeile_von(b)
+    assert z["bereich"] == "privat" and z["sensibel"] is False and z["text"] == "B-Text"
 
 
 @pytest.mark.parametrize("von", [
@@ -472,7 +490,12 @@ def test_getarnter_absender_ist_kein_zwilling(von):
     ("  <gmx-test@gmx.de>  ", "gmx-test@gmx.de"),
     ('"Baumann, Felix" <felix@own.de>', "felix@own.de"),
     ('"felix@own.de" <attacker@evil.de>', "attacker@evil.de"),
-    ("felix@own.de <attacker@evil.de>", "attacker@evil.de"),
+    ("felix@own.de <attacker@evil.de>", None),       # Adresse vor dem <...> (N-a)
+    ("Felix Baumann <felix@own.de>", "felix@own.de"),
+    ("attacker@evil.de, <felix@own.de>", None),      # Adressliste, eigene zuletzt
+    ("g: attacker@evil.de;, <felix@own.de>", None),  # Gruppe vor dem <...>
+    ("attacker@evil.de <felix@own.de>", None),
+    ('"Baumann; Felix: x@y" <felix@own.de>', "felix@own.de"),   # nur in "..." erlaubt
     ('"Felix <felix@own.de>" <attacker@evil.de>', None),
     ("<felix@own.de>, <attacker@evil.de>", None),
     ("<felix@own.de> attacker@evil.de", None),
@@ -488,6 +511,22 @@ def test_absender_streng(von, erwartet):
         z = conn.execute(f"select {post_erledigt.absender_streng_sql('m')} as a "
                          "from (select %s::text as von) m", (von,)).fetchone()
     assert z["a"] == erwartet
+
+
+def test_absender_streng_nach_decode_header():
+    """N-a: `von` entsteht per decode_header ueber den ganzen Kopf - ein kodiertes Wort
+    darf keine zweite Adresse vor die eigene schieben."""
+    import email
+    import post_erledigt
+    import postfach
+    roh = email.message_from_string(
+        "From: attacker@evil.de =?utf-8?q?=2C_=3Cfelix=40own.de=3E?=\n\nx")
+    von = postfach._kopf(roh, "From")
+    assert "<felix@own.de>" in von and von.startswith("attacker@evil.de")
+    with server.pool.connection() as conn:
+        z = conn.execute(f"select {post_erledigt.absender_streng_sql('m')} as a "
+                         "from (select %s::text as von) m", (von,)).fetchone()
+    assert z["a"] is None
 
 
 def test_absender_sql_alias_geprueft_und_alter_wert_gleich():

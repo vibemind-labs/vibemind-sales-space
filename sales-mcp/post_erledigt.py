@@ -46,9 +46,14 @@ def absender_streng_sql(alias: str) -> str:
     NULL (fail closed). Gilt nur: genau EIN <...> am Ende (davor kein < oder >), darin
     genau eine Adresse - oder ohne spitze Klammern der ganze Wert als eine blosse Adresse.
     So schmuggelt weder ein Anzeigename mit <adresse> noch eine Adressliste eine eigene
-    Adresse vor die echte (Security-Re-Review F2)."""
+    Adresse vor die echte (Security-Re-Review F2). Vor dem <...> steht nur ein
+    Anzeigename: ohne seine "..."-Teile darf er kein @ , ; : enthalten - sonst stuende
+    dort eine weitere Adresse oder eine Gruppe (Re-Review 2, N-a; `von` ist der ganze
+    Kopf durch decode_header, auch kodierte Woerter an Stellen, die RFC 2047 nicht kennt)."""
     a = _alias_pruefen(alias)
     return (rf"(case when {a}.von ~ '^[^<>]*<\s*{_ADRESSE_RE}\s*>\s*$' "
+            rf"and coalesce(regexp_replace(substring({a}.von from '^([^<>]*)<'), "
+            "'\"[^\"]*\"', '', 'g'), '') !~ '[@,;:]' "
             rf"then lower(substring({a}.von from '<\s*({_ADRESSE_RE})\s*>\s*$')) "
             rf"when btrim({a}.von) ~ '^{_ADRESSE_RE}$' then lower(btrim({a}.von)) end)")
 
