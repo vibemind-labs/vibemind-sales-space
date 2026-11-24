@@ -19,8 +19,38 @@ RECHNUNGEN = "Rechnungen"
 ARTEN = ("erledigt", "bezahlt")
 JE_SEITE = 50
 
+def _alias_pruefen(alias: str) -> str:
+    if not isinstance(alias, str) or not alias.isidentifier():
+        raise ValueError("ungueltiger Tabellen-Alias")
+    return alias
+
+
+def absender_sql(alias: str = "m") -> str:
+    """Absenderadresse der Zeile `alias` in SQL, kleingeschrieben (erstes <...>, sonst
+    der ganze Wert). Fuer den Kontakt-Abgleich; als Sicherheitspruefung zu lax, dafuer
+    gibt es `absender_streng_sql`."""
+    a = _alias_pruefen(alias)
+    return f"lower(coalesce(substring({a}.von from '<([^>]+)>'), trim({a}.von)))"
+
+
 # Absenderadresse in SQL, kleingeschrieben; Task 7 nutzt sie wieder.
-ABSENDER_SQL = "lower(coalesce(substring(m.von from '<([^>]+)>'), trim(m.von)))"
+ABSENDER_SQL = absender_sql("m")
+
+# Eine blosse Adresse, nur ASCII (kein Zeichen, das lower() auf ein anderes faltet; kein
+# `%`, damit der Text in psycopg-Abfragen mit Parametern bleiben kann).
+_ADRESSE_RE = "[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+"
+
+
+def absender_streng_sql(alias: str) -> str:
+    """Absenderadresse der Zeile `alias` fuer Sicherheitspruefungen, kleingeschrieben, sonst
+    NULL (fail closed). Gilt nur: genau EIN <...> am Ende (davor kein < oder >), darin
+    genau eine Adresse - oder ohne spitze Klammern der ganze Wert als eine blosse Adresse.
+    So schmuggelt weder ein Anzeigename mit <adresse> noch eine Adressliste eine eigene
+    Adresse vor die echte (Security-Re-Review F2)."""
+    a = _alias_pruefen(alias)
+    return (rf"(case when {a}.von ~ '^[^<>]*<\s*{_ADRESSE_RE}\s*>\s*$' "
+            rf"then lower(substring({a}.von from '<\s*({_ADRESSE_RE})\s*>\s*$')) "
+            rf"when btrim({a}.von) ~ '^{_ADRESSE_RE}$' then lower(btrim({a}.von)) end)")
 
 
 def stichtag_gesetzt() -> bool:

@@ -405,6 +405,127 @@ def test_privater_zwilling_schlaegt_business_bezug_sensibel_aus_beiden():
     assert _zeile_von(raus)["sensibel"] is True
 
 
+# --- Sicherheitsrunde 2: fremde Kopie als Bezug (F1), strenger Absender (F2), leere
+# Kontoadresse (F4), alle Zwillinge zaehlen (bool_or) ------------------------------------
+
+@pytest.mark.parametrize("falsch_vor_antwort", [True, False], ids=["falsch-vorher", "falsch-nachher"])
+def test_fremde_kopie_einer_gesendeten_id_ist_kein_bezug(falsch_vor_antwort):
+    """F1: Felix sendet A (privat); eine fremde Mail traegt A's Message-ID (business,
+    sensibel); Felix antwortet mit B auf A. B bleibt privat, behaelt den Inhalt und
+    gehoert nicht zur Unterhaltung der fremden Mail."""
+    _konto()
+    a = _roh("gmx-test", "a@x", richtung="gesendet", bereich="privat", text="A-Text")
+
+    def falsch():
+        return _roh("gmx-test", "a@x", tage=1, bereich="business", sensibel=True,
+                    von="Mallory <mallory@example.org>")
+
+    def antwort():
+        return _roh("gmx-test", "b@x", tage=2, richtung="gesendet", in_reply_to="a@x",
+                    referenzen=["a@x"], bereich="privat", text="B-Text")
+    if falsch_vor_antwort:
+        f = falsch()
+        b = antwort()
+    else:
+        b = antwort()
+        f = falsch()
+    post_unterhaltung.nachziehen()
+    z = _zeile_von(b)
+    assert z["bereich"] == "privat" and z["sensibel"] is False and z["text"] == "B-Text"
+    assert z["an"] == "b@example.org" and z["anhaenge"] == ["x.pdf"]
+    assert _unt(b) == _unt(a) and _unt(f) not in (_unt(a), _unt(b))
+
+
+def test_eigene_kopie_einer_gesendeten_id_bleibt_bezug():
+    """F1, Gegenprobe: die echte Kopie (Mail an mich selbst, eigene Adresse) zaehlt weiter."""
+    _konto()
+    a = _roh("gmx-test", "a@x", richtung="gesendet", bereich="privat", text="A-Text")
+    kopie = _roh("gmx-test", "a@x", tage=1, bereich="privat", sensibel=True, von=EIGEN)
+    b = _roh("gmx-test", "b@x", tage=2, richtung="gesendet", in_reply_to="a@x",
+             bereich="privat", text="B-Text")
+    post_unterhaltung.nachziehen()
+    assert _zeile_von(b)["sensibel"] is True and _zeile_von(b)["text"] is None
+    assert _unt(a) == _unt(kopie) == _unt(b)
+
+
+@pytest.mark.parametrize("von", [
+    '"Felix <gmx-test@gmx.de>" <mallory@example.org>',     # Anzeigename mit <eigene>
+    "<gmx-test@gmx.de>, <mallory@example.org>",            # Adressliste
+    '"gmx-test@gmx.de" <mallory@example.org>',             # Anzeigename sieht aus wie eigene
+    "gmx-test@gmx.de, mallory@example.org",                # Liste ohne Klammern
+])
+def test_getarnter_absender_ist_kein_zwilling(von):
+    """F2: weder Anzeigename noch Adressliste schmuggeln die eigene Adresse durch."""
+    _konto()
+    raus = _roh("gmx-test", "raus@x", richtung="gesendet", bereich="privat",
+                text="Privater Text")
+    f = _roh("gmx-test", "raus@x", tage=1, bereich="privat", sensibel=True, von=von)
+    assert post_unterhaltung.nachziehen()["geerbt"] == 0
+    z = _zeile_von(raus)
+    assert z["sensibel"] is False and z["text"] == "Privater Text"
+    assert _unt(raus) != _unt(f)
+
+
+@pytest.mark.parametrize("von, erwartet", [
+    ("Felix <GMX-Test@gmx.de>", "gmx-test@gmx.de"),
+    ("gmx-test@gmx.de", "gmx-test@gmx.de"),
+    ("  <gmx-test@gmx.de>  ", "gmx-test@gmx.de"),
+    ('"Baumann, Felix" <felix@own.de>', "felix@own.de"),
+    ('"felix@own.de" <attacker@evil.de>', "attacker@evil.de"),
+    ("felix@own.de <attacker@evil.de>", "attacker@evil.de"),
+    ('"Felix <felix@own.de>" <attacker@evil.de>', None),
+    ("<felix@own.de>, <attacker@evil.de>", None),
+    ("<felix@own.de> attacker@evil.de", None),
+    ("felix@own.de, attacker@evil.de", None),
+    ("fe\u212alix@own.de", None),            # KELVIN SIGN, lower() koennte falten
+    ("", None),
+    ("   ", None),
+    (None, None),
+])
+def test_absender_streng(von, erwartet):
+    import post_erledigt
+    with server.pool.connection() as conn:
+        z = conn.execute(f"select {post_erledigt.absender_streng_sql('m')} as a "
+                         "from (select %s::text as von) m", (von,)).fetchone()
+    assert z["a"] == erwartet
+
+
+def test_absender_sql_alias_geprueft_und_alter_wert_gleich():
+    import post_erledigt
+    assert post_erledigt.ABSENDER_SQL == (
+        "lower(coalesce(substring(m.von from '<([^>]+)>'), trim(m.von)))")
+    assert post_erledigt.absender_sql("t") == post_erledigt.ABSENDER_SQL.replace("m.", "t.")
+    for f in (post_erledigt.absender_sql, post_erledigt.absender_streng_sql,
+              post_unterhaltung._eigen_sql, post_unterhaltung._bezug_zulaessig_sql):
+        for schlecht in ("m.von", "m; drop", "", "1m"):
+            with pytest.raises(ValueError):
+                f(schlecht)
+
+
+def test_leere_kontoadresse_ist_nie_eigen():
+    """F4: ein Konto ohne Adresse und eine Mail ohne Absender ergeben keinen Zwilling."""
+    _konto()
+    with server.pool.connection() as conn:
+        conn.execute("insert into post_konten (besitzer, kennung, anbieter, adresse, quelle) "
+                     "values ('felix', 'leer-k', 'gmx', '  ', 'ui')")
+    raus = _roh("gmx-test", "raus@x", richtung="gesendet", bereich="privat",
+                text="Privater Text")
+    f = _roh("gmx-test", "raus@x", tage=1, bereich="privat", sensibel=True, von="")
+    assert post_unterhaltung.nachziehen()["geerbt"] == 0
+    assert _zeile_von(raus)["sensibel"] is False and _unt(raus) != _unt(f)
+
+
+def test_alle_zwillinge_zaehlen():
+    """Nit: sensibel aus dem einen, privat aus dem anderen Zwilling - beides gilt."""
+    _konto()
+    _roh("gmx-test", "selbst@x", bereich="business", sensibel=True, von=EIGEN)
+    _roh("gmx-test", "selbst@x", tage=1, bereich="privat", von=EIGEN)
+    raus = _roh("gmx-test", "selbst@x", tage=2, richtung="gesendet", bereich="business")
+    post_unterhaltung.nachziehen()
+    z = _zeile_von(raus)
+    assert z["sensibel"] is True and z["bereich"] == "privat" and z["text"] is None
+
+
 def test_sperrschluessel_traegt_das_schema(monkeypatch):
     _konto()
     mail_id = _roh("gmx-test", "m1@x", zuordnen=False)
