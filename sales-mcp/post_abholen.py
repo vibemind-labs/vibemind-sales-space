@@ -92,6 +92,7 @@ _gateway_serie: set[str] = set()   # Mail-IDs der laufenden Serie; lebt im Proze
 KOPF_MAX = 1000               # Absender/Empfaenger/Betreff: Fremddaten, gedeckelt
 REFERENZEN_MAX = 20           # References: nur die letzten Kennungen (naechste Vorfahren)
 GESENDET_STAPEL = 50          # gesendete Mails je Konto und Runde
+KOPF_STAPEL = 200             # Bestandsmails je Konto und Runde, deren Antwortkoepfe nachgelesen werden
 ANHANG_NAME_MAX = 200
 ANHAENGE_MAX = 50
 
@@ -535,6 +536,81 @@ def gesendet_abholen(zeile: dict, kasten, stapel: int = GESENDET_STAPEL) -> int:
     return neu
 
 
+def _kopf_ort(z: dict) -> tuple[str, int | None]:
+    """Ordner und UID, unter der die Mail beim Server liegt (INBOX: imap_uid)."""
+    if z["ordner"] == "INBOX":
+        return "INBOX", z["imap_uid"]
+    return z["ordner"], z["ordner_uid"]
+
+
+def _kopf_eintragen(conn, z: dict, gelesen: tuple | None) -> bool:
+    """Eine Zeile als nachgelesen markieren; bei passender Message-ID auch die Kennungen
+    schreiben und die Mail in ihre Unterhaltung haengen. True = markiert."""
+    passt = (gelesen is not None and not z["message_id_ersatz"]
+             and _rein(gelesen[0], KOPF_MAX) == z["message_id"])
+    with conn.transaction():
+        if passt:
+            antwort_auf = _kennungen(gelesen[1])
+            referenzen = _kennungen(gelesen[2])[-REFERENZEN_MAX:]
+            geaendert = conn.execute(
+                "update post_mails set in_reply_to = %s, referenzen = %s, "
+                "kopf_nachgelesen = true where id = %s and not kopf_nachgelesen "
+                "returning id", (antwort_auf[0] if antwort_auf else None, referenzen,
+                                 z["id"])).fetchone()
+            if geaendert is not None and (antwort_auf or referenzen):
+                # Savepoint: scheitert nur die Zuordnung, bleibt der Kopf-Eintrag.
+                _unterhaltung_zuordnen(conn, z["id"])
+        else:
+            geaendert = conn.execute(
+                "update post_mails set kopf_nachgelesen = true where id = %s "
+                "and not kopf_nachgelesen returning id", (z["id"],)).fetchone()
+    return geaendert is not None
+
+
+def koepfe_nachlesen(zeile: dict, kasten, stapel: int = KOPF_STAPEL) -> int:
+    """Liest fuer hoechstens `stapel` Eingangsmails des Kontos ohne Antwortkoepfe (neueste
+    zuerst) In-Reply-To und References nach, nur lesend (EXAMINE, UID FETCH BODY.PEEK der
+    Kopfzeilen). Kennungen werden nur uebernommen, wenn die Message-ID unter der UID zur
+    gespeicherten passt; sonst, bei fehlender Mail und bei Platzhalter-IDs, wird nur
+    `kopf_nachgelesen` gesetzt. Weicht die UIDVALIDITY von INBOX ab, bleiben die
+    INBOX-Zeilen in dieser Runde liegen. Rueckgabe = markierte Zeilen."""
+    inbox_ok = True
+    post_imap.lesend_waehlen(kasten, "INBOX")
+    aktuell = _uidvalidity(kasten)
+    with server.pool.connection() as conn:
+        # Frisch lesen: konto_abholen kann den Wert in dieser Runde erneuert haben.
+        gespeichert = conn.execute("select uidvalidity from post_konten where id = %s",
+                                   (zeile["id"],)).fetchone()
+        gespeichert = gespeichert["uidvalidity"] if gespeichert else None
+        if aktuell is not None and gespeichert is not None and aktuell != gespeichert:
+            inbox_ok = False
+        zeilen = conn.execute(
+            "select id, imap_uid, message_id, message_id_ersatz, ordner, ordner_uid "
+            "from post_mails where konto_id = %s and richtung = 'eingang' "
+            "and not kopf_nachgelesen and (%s or ordner <> 'INBOX') "
+            "and not (ordner = 'INBOX' and imap_uid < 0) "
+            "order by datum desc nulls last, id desc limit %s",
+            (zeile["id"], inbox_ok, int(stapel))).fetchall()
+    if not zeilen:
+        return 0
+    je_ordner: dict[str, list[dict]] = {}
+    for z in zeilen:
+        je_ordner.setdefault(_kopf_ort(z)[0], []).append(z)
+    markiert = 0
+    with server.pool.connection() as conn:
+        for ordner, gruppe in je_ordner.items():
+            uids = [u for u in (_kopf_ort(z)[1] for z in gruppe) if u is not None and u > 0]
+            try:
+                gelesen = post_imap.antwortkoepfe_lesen(kasten, ordner, uids)
+            except post_imap.Fehlt:
+                gelesen = {}          # Ordner gibt es nicht mehr: die Mail ist nicht zu finden
+            for z in gruppe:
+                uid = _kopf_ort(z)[1]
+                if _kopf_eintragen(conn, z, gelesen.get(uid) if uid is not None else None):
+                    markiert += 1
+    return markiert
+
+
 def gesendet_groessen() -> list[str]:
     """Je aktivem Konto eine Zeile `<kennung> <anzahl|unbekannt>`. Nur STATUS, nichts
     wird gespeichert, kein Ordnername in der Ausgabe."""
@@ -877,7 +953,7 @@ def modellaufrufe_heute() -> int:
 
 def eine_runde() -> dict:
     bilanz = {"abgeholt": 0, "konten_fehler": 0, "eingeordnet": 0,
-              "gesendet": 0, "gesendet_fehler": 0}
+              "gesendet": 0, "gesendet_fehler": 0, "koepfe": 0, "koepfe_fehler": 0}
     for zeile in post_konten.aktive_konten():
         if _STOPP.is_set():
             return bilanz
@@ -892,6 +968,13 @@ def eine_runde() -> dict:
                     except Exception as e:  # noqa: BLE001 - kostet nicht das INBOX-Abholen
                         bilanz["gesendet_fehler"] += 1
                         LOG.warning("Konto %s: Gesendet abholen fehlgeschlagen (%s)",
+                                    zeile["kennung"], type(e).__name__)
+                if not _STOPP.is_set():
+                    try:
+                        bilanz["koepfe"] += koepfe_nachlesen(zeile, kasten)
+                    except Exception as e:  # noqa: BLE001 - kostet weder INBOX noch Gesendet
+                        bilanz["koepfe_fehler"] += 1
+                        LOG.warning("Konto %s: Antwortkoepfe nachlesen fehlgeschlagen (%s)",
                                     zeile["kennung"], type(e).__name__)
             finally:
                 try:

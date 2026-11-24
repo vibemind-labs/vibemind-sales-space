@@ -411,3 +411,39 @@ def antwort_gesendet(kasten, ordner: str, message_id: str) -> bool:
         return False
     lesend_waehlen(kasten, ordner)
     return antwort_suchen(kasten, message_id)
+
+
+_KOPF_FELDER = "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO REFERENCES)])"
+_UID_IN_ANTWORT = re.compile(rb"\bUID (\d+)\b")
+
+
+def antwortkoepfe_lesen(kasten, ordner: str, uids: list[int]
+                        ) -> dict[int, tuple[str | None, str | None, str | None]]:
+    """Message-ID, In-Reply-To und References (Rohtext, None = Kopf fehlt) je UID im Ordner.
+
+    Ein einziges UID FETCH mit BODY.PEEK (kein Gelesen-Merker, kein Rumpf) im lesend gewaehlten
+    Ordner. Die Message-ID kommt ohne <> wie bei `message_id`. UIDs, die der Server nicht
+    nennt, fehlen im Ergebnis. Fehlt der Ordner, gilt `Fehlt`."""
+    nummern = sorted({int(u) for u in uids if int(u) > 0})
+    if not nummern:
+        return {}
+    lesend_waehlen(kasten, ordner)
+    daten = _ok(kasten.uid("FETCH", ",".join(map(str, nummern)), _KOPF_FELDER), "UID FETCH")
+    gefragt = set(nummern)
+    ergebnis: dict[int, tuple[str | None, str | None, str | None]] = {}
+    for teil in daten or ():
+        if not (isinstance(teil, tuple) and len(teil) >= 2 and teil[1] is not None):
+            continue
+        treffer = _UID_IN_ANTWORT.search(teil[0] or b"")
+        if treffer is None or int(treffer.group(1)) not in gefragt:
+            continue        # ungefragte FETCH-Antwort einer anderen Mail
+        kopf = email.message_from_bytes(teil[1])
+
+        def roh(name: str) -> str | None:
+            wert = postfach._kopf(kopf, name).replace("\x00", "").strip()
+            return wert or None
+
+        mid = roh("Message-ID")
+        ergebnis[int(treffer.group(1))] = (
+            mid.strip("<>")[:_KOPF_MAX] if mid else "", roh("In-Reply-To"), roh("References"))
+    return ergebnis

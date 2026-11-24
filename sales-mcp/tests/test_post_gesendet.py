@@ -254,3 +254,160 @@ def test_ordner_groesse_liest_nur_die_klammerliste():
         def status(self, name, namen):
             return "OK", [b'"Post MESSAGES 9" (UIDNEXT 3)']
     assert post_imap.ordner_groesse(Ohne(), "Post MESSAGES 9") is None
+
+
+# --- Antwortkoepfe des Bestands nachlesen (Task 5) ------------------------------
+
+def _alt(konto, uid, message_id, *, ordner="INBOX", ordner_uid=None, datum="2026-10-01T10:00:00Z",
+         richtung="eingang", ersatz=False):
+    """Eine Bestandszeile ohne Antwortkoepfe (kopf_nachgelesen = false)."""
+    gesendet = richtung == "gesendet"
+    with server.pool.connection() as conn:
+        return conn.execute(
+            "insert into post_mails (konto_id, imap_uid, message_id, besitzer, von, betreff, "
+            "datum, status, richtung, ordner, ordner_uid, message_id_ersatz, bereich) "
+            "values (%s, %s, %s, 'felix', 'a@x.example', 'Angebot', %s::timestamptz, %s, %s, %s, "
+            "%s, %s, 'privat') returning id",
+            (konto["id"], uid, message_id, datum, "gesendet" if gesendet else "neu", richtung,
+             ordner, ordner_uid, ersatz)).fetchone()["id"]
+
+
+def _zeile_id(mail_id) -> dict:
+    with server.pool.connection() as conn:
+        return conn.execute("select * from post_mails where id = %s", (mail_id,)).fetchone()
+
+
+def _antwort(message_id, in_reply_to=None, references=None) -> bytes:
+    return _mail(message_id=message_id, in_reply_to=in_reply_to, references=references)
+
+
+def test_bestand_bekommt_antwortkoepfe():
+    konto = _konto()
+    raus = _alt(konto, 1, "s1@x", richtung="gesendet", ordner="Gesendet",
+                datum="2026-09-30T10:00:00Z")
+    alt = _alt(konto, 7, "m7@x")
+    kasten = Attrappe({7: _antwort("<m7@x>", in_reply_to="<s1@x>", references="<a@x> <s1@x>")})
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten) == 1
+    z = _zeile_id(alt)
+    assert z["kopf_nachgelesen"] is True and z["in_reply_to"] == "s1@x"
+    assert z["referenzen"] == ["a@x", "s1@x"]
+    assert z["unterhaltung"] is not None
+    assert _zeile_id(raus)["unterhaltung"] == z["unterhaltung"]
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten) == 0   # nichts mehr offen
+
+
+def test_gesendete_zeilen_bleiben_unberuehrt():
+    konto = _konto()
+    raus = _alt(konto, 1, "s1@x", richtung="gesendet", ordner="Gesendet")
+    kasten = Attrappe({}, ordner={"Gesendet": {1: _antwort("<s1@x>", in_reply_to="<x@x>")}})
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten) == 0
+    assert _zeile_id(raus)["kopf_nachgelesen"] is False and kasten.befehle == []
+
+
+def test_verschobene_mail_am_neuen_ort():
+    konto = _konto()
+    alt = _alt(konto, 3, "m3@x", ordner="Zur Info", ordner_uid=9)
+    kasten = Attrappe({3: _antwort("<andere@x>")},
+                      ordner={"Zur Info": {9: _antwort("<m3@x>", in_reply_to="<v@x>")}})
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten) == 1
+    assert [(o, b, u) for o, b, u, _ in kasten.befehle] == [("Zur Info", "fetch", "9")]
+    z = _zeile_id(alt)
+    assert z["in_reply_to"] == "v@x" and z["kopf_nachgelesen"] is True
+
+
+def test_fremde_message_id_wird_nicht_uebernommen():
+    konto = _konto()
+    alt = _alt(konto, 7, "m7@x")
+    kasten = Attrappe({7: _antwort("<fremd@x>", in_reply_to="<s1@x>", references="<s1@x>")})
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten) == 1
+    z = _zeile_id(alt)
+    assert z["in_reply_to"] is None and z["referenzen"] == [] and z["kopf_nachgelesen"] is True
+
+
+def test_fehlende_mail_und_platzhalter_werden_nur_markiert():
+    konto = _konto()
+    weg = _alt(konto, 5, "m5@x")
+    ersatz = _alt(konto, 6, "x:6@sales-post", ersatz=True)
+    kasten = Attrappe({6: _antwort("<x:6@sales-post>", in_reply_to="<s1@x>")})
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten) == 2
+    for i in (weg, ersatz):
+        z = _zeile_id(i)
+        assert z["kopf_nachgelesen"] is True and z["in_reply_to"] is None
+
+
+def test_nur_peek():
+    konto = _konto()
+    _alt(konto, 7, "m7@x")
+    _alt(konto, 8, "m8@x", ordner="Zur Info", ordner_uid=2)
+    kasten = Attrappe({7: _antwort("<m7@x>")}, ordner={"Zur Info": {2: _antwort("<m8@x>")}})
+    post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten)
+    assert len(kasten.befehle) == 2 and kasten.geholt == [] and kasten.verboten == []
+    for _o, befehl, _u, teil in kasten.befehle:
+        assert befehl == "fetch"
+        assert teil == "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO REFERENCES)])"
+        assert "RFC822" not in teil
+    assert all(readonly is True for _m, readonly in kasten.selects)
+
+
+def test_stapel_und_reihenfolge():
+    konto = _konto()
+    with server.pool.connection() as conn:
+        for n in range(1, 451):
+            conn.execute(
+                "insert into post_mails (konto_id, imap_uid, message_id, besitzer, von, status, "
+                "datum, bereich) values (%s, %s, %s, 'felix', 'a@x.example', 'neu', "
+                "'2026-01-01T00:00:00Z'::timestamptz + make_interval(mins => %s), 'privat')",
+                (konto["id"], n, f"m{n}@x", n))
+    kasten = Attrappe({})
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten, stapel=200) == 200
+    erledigt = [r["imap_uid"] for r in _mails("kopf_nachgelesen")]
+    assert erledigt == list(range(251, 451))
+    assert len(kasten.befehle) == 1                      # ein UID FETCH je Ordner
+
+
+def test_uidvalidity_abweichung_laesst_inbox_zeilen_liegen():
+    konto = _konto()
+    with server.pool.connection() as conn:
+        conn.execute("update post_konten set uidvalidity = 5 where id = %s", (konto["id"],))
+    inbox = _alt(konto, 7, "m7@x")
+    moved = _alt(konto, 8, "m8@x", ordner="Zur Info", ordner_uid=2)
+    kasten = Attrappe({7: _antwort("<m7@x>")}, uidvalidity=6,
+                      ordner={"Zur Info": {2: _antwort("<m8@x>")}})
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten) == 1
+    assert _zeile_id(inbox)["kopf_nachgelesen"] is False
+    assert _zeile_id(moved)["kopf_nachgelesen"] is True
+
+
+def test_negative_inbox_uid_wird_uebersprungen():
+    konto = _konto()
+    alt = _alt(konto, -3, "m3@x")
+    kasten = Attrappe({})
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten) == 0
+    assert _zeile_id(alt)["kopf_nachgelesen"] is False
+
+
+def test_zuordnung_scheitert_kopf_bleibt(monkeypatch):
+    konto = _konto()
+    alt = _alt(konto, 7, "m7@x")
+    import post_unterhaltung
+    monkeypatch.setattr(post_unterhaltung, "zuordnen",
+                        lambda conn, mail_id: (_ for _ in ()).throw(ValueError("kaputt")))
+    kasten = Attrappe({7: _antwort("<m7@x>", in_reply_to="<s1@x>")})
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten) == 1
+    z = _zeile_id(alt)
+    assert z["in_reply_to"] == "s1@x" and z["kopf_nachgelesen"] is True
+
+
+def test_runde_trennt_kopf_fehler(monkeypatch):
+    _konto()
+    monkeypatch.setattr(post_abholen.post_konten, "aktive_konten", lambda: [_zeile("gmx-test")])
+    kasten = Attrappe({})
+    monkeypatch.setattr(post_abholen.post_konten, "verbinden", lambda z: kasten)
+    monkeypatch.setattr(post_abholen, "koepfe_nachlesen",
+                        lambda z, k: (_ for _ in ()).throw(RuntimeError("x")))
+    monkeypatch.setattr(post_abholen, "_einordnen", lambda b: None)
+    monkeypatch.setattr(post_abholen, "_unterhaltungen_nachziehen", lambda b: None)
+    monkeypatch.setattr(post_abholen, "_anweisungen_nachziehen", lambda b: None)
+    monkeypatch.setattr(post_abholen, "_aufraeumen", lambda b: None)
+    bilanz = post_abholen.eine_runde()
+    assert bilanz["koepfe_fehler"] == 1 and bilanz["koepfe"] == 0 and bilanz["konten_fehler"] == 0

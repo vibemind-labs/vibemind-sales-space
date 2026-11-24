@@ -88,6 +88,7 @@ class Attrappe:
         self.geholt = []
         self.verboten = []
         self.ablehnen = set()      # UIDs, deren naechster Abruf mit NO endet
+        self.befehle = []          # jeder UID-Befehl: (Ordner, Befehl, UID-Menge, Datenteil)
 
     @staticmethod
     def _name(mailbox) -> str:
@@ -137,6 +138,22 @@ class Attrappe:
                 uids = [max(mails)]
             return "OK", [" ".join(map(str, uids)).encode()]
         if befehl == "fetch":
+            self.befehle.append((self.gewaehlt, befehl, str(args[0]),
+                                 args[1] if len(args) > 1 else ""))
+            if "BODY.PEEK[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO REFERENCES)]" in str(args[-1]):
+                antwort = []
+                for uid in sorted(int(u) for u in str(args[0]).split(",")):
+                    roh = mails.get(uid)
+                    if roh is None:
+                        continue
+                    kopf = email.message_from_bytes(roh)
+                    text = "".join(f"{n}: {kopf[n]}\r\n" for n in
+                                   ("Message-ID", "In-Reply-To", "References") if kopf[n])
+                    antwort.append((f"1 (UID {uid} BODY[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO "
+                                    f"REFERENCES)] {{{len(text)}}}".encode(),
+                                    (text + "\r\n").encode()))
+                    antwort.append(b")")
+                return "OK", antwort or [None]
             uid = int(args[0])
             self.geholt.append(uid)
             if uid in self.ablehnen:
