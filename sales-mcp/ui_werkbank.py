@@ -65,7 +65,7 @@ VORLAGE = {"titel": "Titel", "stichpunkte": "Stichpunkte", "zahl": "Zahl", "zita
            "vergleich": "Vergleich", "agenda": "Agenda"}
 UEBERGANG = {"schnitt": "Schnitt", "blende": "Blende", "higgsfield": "Higgsfield-Übergang (mit Freigabe)"}
 HF_PROMPT_MAX = 1000               # wie Marketing-API und Datenbank (102)
-_HF_PREIS = re.compile(r"^[0-9]{1,3}(\.[0-9]{1,4})?$")
+_HF_PREIS = re.compile(r"^[0-9]{1,3}(\.[0-9]{1,8})?$")
 HF_STAND = {"vorgeschlagen": "wartet auf deine Freigabe", "freigegeben": "freigegeben, wird bestellt",
             "bestellt": "wird erzeugt", "fertig": "fertig", "verworfen": "verworfen", "fehler": "gescheitert",
             "vorbereitung": "Vorschlag wird vorbereitet"}
@@ -1097,6 +1097,11 @@ def routen(ui) -> list:
             teile.append(f'<p>Der Clip entsteht bei Higgsfield. Das dauert ein paar Minuten; die Seite zeigt ihn, '
                          f'sobald er da ist.</p><p class="meta">{meta} Preis: {credits(preis)} Credits.</p>'
                          f'<p class="wb-text">{e(prompt)}</p>')
+            if darf:      # freigegeben: Freigabe zurueckziehen (noch nichts bestellt); bestellt: aufgeben, wenn nichts kommt
+                text = ("Freigabe zurückziehen" if stand == "freigegeben"
+                        else "Aufgeben (normaler Schnitt, die Credits sind ausgegeben)")
+                teile.append(hf_formkopf("werkbank-hf-urteil", aid, {"hid": hid, "urteil": "verwerfen"})
+                             + f'<div class="aktionen"><button type="submit">{text}</button></div></form>')
         elif stand == "fertig":
             datei = str(c.get("datei") or "")
             if medien.WERKBANK_HF_MUSTER.fullmatch(datei) and datei.endswith(".mp4"):
@@ -1179,7 +1184,8 @@ def routen(ui) -> list:
         except marketing_pult.PultFehler as f:
             if f.art == "abgelehnt":
                 grund = kurztext(f.grund) or "Der Clip ist nicht mehr in diesem Stand."
-                rumpf = (_STIL + f'<div class="wb"><p class="hinweis">Das ging nicht: {e(grund)} Nichts wurde bestellt.</p>'
+                rumpf = (_STIL + f'<div class="wb"><p class="hinweis">Das ging nicht: {e(grund)} Durch diesen Klick wurde '
+                         'nichts bestellt. Lade die Seite neu, um den Stand des Übergangs zu sehen.</p>'
                          + (f'<p class="meta">Dein Text steht hier zum Kopieren:</p><textarea readonly rows="6">{e(prompt)}'
                             '</textarea>' if prompt else "")
                          + f'<p><a class="knopf primaer" href="{e(ziel)}">Seite neu laden</a></p></div>')

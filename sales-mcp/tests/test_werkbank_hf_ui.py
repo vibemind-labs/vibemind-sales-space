@@ -87,7 +87,10 @@ def test_leserolle_sieht_die_seite_nicht(leser, hf):  # noqa: F811
 def test_bestellt_hat_keine_knoepfe(klient, hf):  # noqa: F811
     hf.hf = {"clips": [_clip("bestellt")], "credits": 5.25, "bestellt": 1, "vorbereitung": []}
     html = rumpf(get(klient, SEITE))
-    assert "Der Clip entsteht bei Higgsfield" in html and "werkbank-hf-" not in html
+    assert "Der Clip entsteht bei Higgsfield" in html and "Aufgeben (normaler Schnitt" in html
+    assert 'value="erzeugen"' not in html and "werkbank-hf-nochmal" not in html and "<textarea" not in html.split("Higgsfield-Übergänge")[1]
+    hf.hf["clips"] = [_clip("freigegeben")]
+    assert "Freigabe zurückziehen" in rumpf(get(klient, SEITE))
     assert "Bisher bestellt: 1 Clip, 5,25 Credits." in html
 
 
@@ -203,7 +206,7 @@ def test_ablehnung_der_api_zeigt_den_grund_und_den_getippten_text(klient, hf):  
     r = erzeugen(klient, prompt="Mein Text <i>")
     assert r.status_code == 409 and len(hf.posts()) == 1
     assert "Der Preis hat sich geändert. Bitte die Seite neu laden &lt;x&gt;." in r.text
-    assert "Nichts wurde bestellt" in r.text and "Mein Text &lt;i&gt;" in r.text and f'href="{SEITE}#hf"' in r.text
+    assert "Durch diesen Klick wurde nichts bestellt" in r.text and "Mein Text &lt;i&gt;" in r.text and f'href="{SEITE}#hf"' in r.text
 
 
 def test_api_antwortet_nicht_ausgang_offen(klient, hf):  # noqa: F811
