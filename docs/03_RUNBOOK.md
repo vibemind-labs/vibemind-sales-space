@@ -4685,59 +4685,95 @@ entfernen = `500`) und `docker compose up -d --no-deps --no-build sales-post` (n
 
 ## Post-Assistent Stufe 1 ausrollen (Gesendet-Ordner, Unterhaltungen)
 
-Zweig `cc/post-assistent-stufe1`. Neu: `sales-post` holt je Konto zusaetzlich den Gesendet-Ordner **nur lesend**
-ab (`richtung='gesendet'`, Status `gesendet`, je Runde hoechstens 50 Mails), liest fuer den Bestand die
-Antwortkoepfe nach (nur `BODY.PEEK`, 200 Zeilen je Runde) und verknuepft Mails zu Unterhaltungen. Gesendete Mails
-erben Bereich und Schutz (sensibel) der Mail, auf die sie antworten. Sie kosten keinen Modellaufruf, landen in keinem
-Fach, keiner Warteschlange und werden nie verschoben; schreibende Routen lehnen sie ab. Der Posteingang zeigt unter
-einer Mail die Unterhaltung, gesendete Mails tragen das Etikett „Gesendet“. Betroffen sind drei Dienste: `sales-ui`,
-`sales-mcp`, `sales-post`. Das Ausrollen geschieht **nur mit Felix' OK, jeder Schritt einzeln**; kein Merge und kein
-Deploy ohne seine Freigabe. Immer Dienste beim Namen nennen, nie ein nacktes `docker compose up -d`. Alle Befehle auf
-der VM (`ssh offload-vm`, Verzeichnis `~/sales-claw`).
+Zweig `cc/post-assistent-stufe1`. Was neu ist:
+
+- `sales-post` holt je Konto zusaetzlich den Gesendet-Ordner ab, **nur lesend**. Die Zeilen bekommen
+  `richtung='gesendet'` und den Status `gesendet`, je Runde hoechstens 50 Mails.
+- Fuer den Bestand liest `sales-post` die Antwortkoepfe nach (nur `BODY.PEEK`, 200 Zeilen je Konto und Runde) und
+  verknuepft Mails zu Unterhaltungen.
+- Gesendete Mails erben Bereich und Schutz (sensibel) der Mail, auf die sie antworten.
+- Gesendete Mails kosten keinen Modellaufruf. Sie landen in keinem Fach und keiner Warteschlange und werden nie
+  verschoben; schreibende Routen lehnen sie ab.
+- Der Posteingang zeigt unter einer Mail die Unterhaltung. Gesendete Mails tragen das Etikett „Gesendet“.
+
+Betroffen sind drei Dienste: `sales-ui`, `sales-mcp`, `sales-post`. Das Ausrollen geschieht **nur mit Felix' OK,
+jeder Schritt einzeln**; kein Merge und kein Deploy ohne seine Freigabe. Immer Dienste beim Namen nennen, nie ein
+nacktes `docker compose up -d`. Alle Befehle laufen auf der VM (`ssh offload-vm`, Verzeichnis `~/sales-claw`), mit
+`C="docker compose -f docker-compose.yml -f docker-compose.fenster.yml"`.
+
+**Wichtig vorab:** Nach der Migration kann der **alte** `sales-post` keine Mail mehr speichern. Er schreibt mit
+`on conflict (konto_id, imap_uid)`, und diesen Schluessel gibt es danach nicht mehr. Deshalb wird `sales-post` vor der
+Migration gestoppt und erst mit dem neuen Image wieder gestartet. In dieser Zeit geht keine Mail verloren: Sie bleibt
+auf dem Server und wird danach abgeholt.
 
 1. **Voraussetzung:** „Post-Assistent 3a ausrollen“ ist vollstaendig durch (Migration, Dienste, Probe). Stufe 1
-   baut auf den 3a-Spalten und der 3a-Sperre fuer den Agenten auf.
-2. **Sicherung** (Felix' OK), wie in 3a Schritt 1, Datei `post-assistent-stufe1-sicherung.sql` ausserhalb des Repos
-   (enthaelt Mailinhalte, nicht einchecken). Gegenprobe: Datei nicht leer.
-3. **Migration zweimal auf `sales` einspielen** (Felix' OK):
+   baut auf den 3a-Spalten und auf der 3a-Sperre fuer den Agenten auf.
+2. **Konten pruefen** (nur lesend). Gesendete Mails ohne Bezugsmail behalten fuer immer den `standard_bereich` ihres
+   Kontos, und der Standard ist `business`. Damit waeren neue Gesendet-Faeden privater Postfaecher fuer den Agenten
+   als Kopf (Betreff) sichtbar. Diese Abfrage zeigt die Werte:
+
+   ```bash
+   docker exec -i debian-supabase-db-1 psql -U supabase_admin -d postgres -c "select kennung, standard_bereich from sales.post_konten where aktiv"
+   ```
+
+   Felix sagt, welche Konten `privat` sein sollen. Erst danach umstellen, mit seinem ausdruecklichen OK (Schreiben
+   auf `sales`).
+3. **Sicherung** (Felix' OK) vor jeder Aenderung am Schema `sales`:
+
+   ```bash
+   ssh offload-vm 'docker exec debian-supabase-db-1 pg_dump -U supabase_admin -d postgres -t sales.post_mails -t sales.post_konten -t sales.freigabe_eintraege' > post-assistent-stufe1-sicherung.sql
+   ```
+
+   Die Datei ausserhalb des Repos ablegen; sie enthaelt Mailinhalte und wird nicht eingecheckt. Gegenprobe:
+   `grep -c '^CREATE TABLE' post-assistent-stufe1-sicherung.sql` meldet 3.
+4. **Bauen und Rueckweg sichern** (Felix' OK). Drift je Dienst pruefen wie in 3a Schritt 3; weicht etwas ab, stoppen
+   und Felix fragen. Dann:
+   - `docker tag sales-claw-sales-mcp:local sales-claw-sales-mcp:vorher-stufe1`
+   - `$C build sales-mcp`
+5. **Gesendet-Ordner messen** (Felix' OK; nur lesend, speichert nichts). Der laufende `sales-post` kennt den Schalter
+   noch nicht. Deshalb laeuft die Messung als Einmal-Container mit dem neuen Image:
+
+   ```bash
+   $C run --rm --no-deps sales-post python post_abholen.py --gesendet-groessen
+   ```
+
+   Die Ausgabe nennt je aktivem Konto `<kennung> <anzahl|unbekannt>`, ohne Ordnernamen. Die Zahlen Felix nennen.
+   Fuer die erste Abholung braucht es Anzahl / 50 Runden, eine Runde alle 2 Minuten. Beispiel: 6000 Mails sind
+   120 Runden, also etwa 4 Stunden.
+6. **`sales-post` stoppen** (Felix' OK): `$C stop sales-post`. Ab hier ruht die Abholung bis Schritt 8.
+7. **Migration zweimal auf `sales` einspielen** (Felix' OK):
+
    ```bash
    ssh offload-vm 'docker exec -i debian-supabase-db-1 psql -q -U supabase_admin -d postgres -v ON_ERROR_STOP=1 -v schema=sales' < db/post-sammelstelle.sql
    ```
-   Ein zweites Mal ausfuehren: kein Fehler (nur „already exists, skipping“-Hinweise). Die Migration tauscht den
-   eindeutigen Schluessel auf `(konto_id, richtung, imap_uid)` und erlaubt den Status `gesendet`; der alte Code
-   schreibt weiter nur `eingang` und stoert sich daran nicht. NIE `schema=sales_test` mit `sales` verwechseln.
-4. **Bauen, Rueckweg sichern** (Felix' OK). Drift je Dienst pruefen wie in 3a Schritt 3; weicht etwas ab, stoppen und
-   Felix fragen. Dann:
-   - `docker tag sales-claw-sales-mcp:local sales-claw-sales-mcp:vorher-stufe1`
-   - `docker compose -f docker-compose.yml -f docker-compose.fenster.yml build sales-mcp`
-5. **Gesendet-Ordner messen** (Felix' OK; nur lesend, speichert nichts). Der laufende `sales-post` kennt den Schalter
-   noch nicht, deshalb mit dem neuen Image als Einmal-Container:
-   ```bash
-   docker compose -f docker-compose.yml -f docker-compose.fenster.yml run --rm --no-deps sales-post python post_abholen.py --gesendet-groessen
-   ```
-   Ausgabe je aktivem Konto `<kennung> <anzahl|unbekannt>`, ohne Ordnernamen. Die Zahlen Felix nennen. Dauer der
-   ersten Abholung: Anzahl / 50 Runden, eine Runde alle 2 Minuten (Beispiel: 6000 Mails = 120 Runden = etwa 4 Stunden).
-6. **Zuerst die Leser, dann `sales-post`** (Felix' OK, jeder Schritt einzeln), je Dienst
-   `docker compose -f docker-compose.yml -f docker-compose.fenster.yml up -d --no-deps --no-build <svc>`:
+
+   Dann ein zweites Mal ausfuehren: Es darf kein Fehler kommen, nur Hinweise „already exists, skipping“. Die Migration
+   tauscht den eindeutigen Schluessel auf `(konto_id, richtung, imap_uid)` und erlaubt den Status `gesendet`. Die
+   alten Leser (`sales-ui`, `sales-mcp`) laufen damit weiter. NIE `schema=sales_test` mit `sales` verwechseln.
+8. **Zuerst die Leser, dann `sales-post`** (Felix' OK, jeder Schritt einzeln), je Dienst
+   `$C up -d --no-deps --no-build <svc>`:
    - erst `sales-ui` und `sales-mcp`,
    - danach `sales-post`.
 
-   Grund: Alte Leser kennen `richtung` nicht und wuerden gesendete Zeilen unter „Aufmerksamkeit“ und in den Faechern
-   zeigen, der alte Agent koennte sie lesen. Ohne `--force-recreate` auf andere Dienste, ohne nacktes `up`.
-7. **Probe** (Felix' OK, nach der ersten Runde von `sales-post`):
-   - Rundenlog von `sales-post`: Bilanz `gesendet > 0` und `gesendet_fehler == 0` (bei Konten ohne Gesendet-Ordner
-     bleibt `gesendet` 0, das ist kein Fehler).
-   - In der UI zeigt eine beantwortete Mail unter sich die Unterhaltung mit einer Zeile „Gesendet“.
+   Der Grund fuer die Reihenfolge: Alte Leser kennen `richtung` nicht. Sie wuerden gesendete Zeilen unter
+   „Aufmerksamkeit“ und in den Faechern zeigen, und der alte Agent koennte sie lesen. Kein `--force-recreate` auf
+   andere Dienste, kein nacktes `up`.
+9. **Probe** (Felix' OK, nach der ersten Runde von `sales-post`):
+   - Im Rundenlog von `sales-post` steht `gesendet > 0` und `gesendet_fehler == 0`. Bei Konten ohne Gesendet-Ordner
+     bleibt `gesendet` 0; das ist kein Fehler.
+   - In der UI zeigt eine beantwortete Mail unter sich die Unterhaltung, mit einer Zeile „Gesendet“.
    - In keinem Fach steht eine gesendete Mail.
-   - `select count(*) from sales.post_mails where richtung='gesendet' and ziel is not null` ergibt 0
-     (via `docker exec -i debian-supabase-db-1 psql -U supabase_admin -d postgres -c "..."`).
-8. **Rueckweg** (Felix' OK, jeder Schritt einzeln): nur `sales-post` auf den alten Stand.
-   - `docker tag sales-claw-sales-mcp:local sales-claw-sales-mcp:stufe1` (neues Image festhalten)
-   - `docker compose -f docker-compose.yml -f docker-compose.fenster.yml stop sales-post`
-   - `docker tag sales-claw-sales-mcp:vorher-stufe1 sales-claw-sales-mcp:local`
-   - `docker compose -f docker-compose.yml -f docker-compose.fenster.yml up -d --no-deps --no-build sales-post`
-
-   **Die Leser (`sales-ui`, `sales-mcp`) bleiben neu**: gesendete Zeilen stehen schon in der Tabelle, und nur die neuen
-   Leser blenden sie aus. Achtung: Solange `:local` auf den alten Stand zeigt, darf `sales-ui` oder `sales-mcp` nicht
-   neu erstellt werden; vorher `docker tag sales-claw-sales-mcp:stufe1 sales-claw-sales-mcp:local`. Nichts wird
-   geloescht; die Sicherung aus Schritt 2 ist nur der zweite Boden.
+   - Beide Abfragen ergeben 0 (ausfuehren mit `docker exec -i debian-supabase-db-1 psql -U supabase_admin -d postgres -c "..."`):
+     - `select count(*) from sales.post_mails where richtung='gesendet' and ziel is not null`
+     - `select count(*) from sales.post_mails where richtung='gesendet' and (fach is not null or status <> 'gesendet')`
+   - Unvollstaendige Unterhaltungen in den ersten Stunden sind erwartet und kein Fehler. Das Verknuepfen schafft 500
+     Mails je Runde; bei etwa 12 500 vorhandenen Mails sind das rund 25 Runden. Das Nachlesen der Antwortkoepfe
+     schafft 200 Zeilen je Konto und Runde.
+10. **Rueckweg** (Felix' OK). Wann welcher Weg gilt, haengt davon ab, ob die Migration schon eingespielt ist:
+    - **Vor Schritt 7** ist noch nichts am Schema geaendert. Dann `docker tag sales-claw-sales-mcp:vorher-stufe1
+      sales-claw-sales-mcp:local` und `$C up -d --no-deps --no-build sales-post`.
+    - **Nach Schritt 7** gibt es kein Zurueck auf das alte Image: Der alte `sales-post` kann auf dem migrierten Schema
+      keine Mail speichern. Rueckweg ist dann `$C stop sales-post`. Die Abholung ruht, bis ein Fix ausgerollt ist; die
+      Mails bleiben auf dem Server. Die Leser (`sales-ui`, `sales-mcp`) bleiben neu, weil nur sie gesendete Zeilen
+      ausblenden.
+    - Nichts wird geloescht. Die Sicherung aus Schritt 3 ist nur der zweite Boden.
