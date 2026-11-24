@@ -78,10 +78,10 @@ def test_vorschlag_zeigt_bilder_preis_und_aenderbaren_text(klient, hf):  # noqa:
     assert "wartet auf deine Freigabe" in html and "Bisher bestellt" not in html
 
 
-def test_leserolle_sieht_die_karte_ohne_knoepfe(leser, hf):  # noqa: F811
-    html = rumpf(get(leser, SEITE))
-    assert "Übergang von Szene 2 zu Szene 3" in html and "5,25 Credits" in html
-    assert "werkbank-hf-" not in html and "<textarea" not in html.split("Higgsfield-Übergänge")[1]
+def test_leserolle_sieht_die_seite_nicht(leser, hf):  # noqa: F811
+    r = get(leser, SEITE)                       # die Lese-Rolle hat keinen Zugang zur Werkbank (wie die Szenenseite)
+    assert r.status_code == 403 and "werkbank-hf-" not in r.text and "Credits" not in r.text
+    assert not hf.aufrufe
 
 
 def test_bestellt_hat_keine_knoepfe(klient, hf):  # noqa: F811
