@@ -1322,7 +1322,10 @@ services:
       - SALES_DB_SCHEMA=${SALES_DB_SCHEMA:-sales}
       - TZ=${TZ:-Europe/Berlin}
       - LADEN_PRAEFIX=${LADEN_PRAEFIX:-sales}
-      - AUFTRAGSBUCH_LADEN=${AUFTRAGSBUCH_LADEN:?gleich dem Wert beim Gehirn}
+      # Kein ":?" hier: Compose loest ALLE Dienste auf, auch fuer Laeden mit eigener --env-file, in
+      # denen der Abholer nie laeuft (update.sh brach daran ab). Fehlt der Wert, startet der Abholer
+      # selbst nicht ("AUFTRAGSBUCH_LADEN fehlt").
+      - AUFTRAGSBUCH_LADEN=${AUFTRAGSBUCH_LADEN:-}
       - AUFTRAG_ARTEN_FREI=${AUFTRAG_ARTEN_FREI:-kontakt_finden}
       - AUFTRAG_TEST_KONTAKT_ID=${AUFTRAG_TEST_KONTAKT_ID:-}
       - POST_BESITZER=${POST_BESITZER:-}
