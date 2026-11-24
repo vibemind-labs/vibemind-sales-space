@@ -63,7 +63,17 @@ BILDART = {"slide": "Slide mit Stimme aus dem Off", "avatar_gross": "Avatar im g
            "avatar_slide": "Avatar vor der Slide", "clip": "Filmischer Clip"}
 VORLAGE = {"titel": "Titel", "stichpunkte": "Stichpunkte", "zahl": "Zahl", "zitat": "Zitat",
            "vergleich": "Vergleich", "agenda": "Agenda"}
-UEBERGANG = {"schnitt": "Schnitt", "blende": "Blende"}
+UEBERGANG = {"schnitt": "Schnitt", "blende": "Blende", "higgsfield": "Higgsfield-Übergang (mit Freigabe)"}
+HF_PROMPT_MAX = 1000               # wie Marketing-API und Datenbank (102)
+_HF_PREIS = re.compile(r"^[0-9]{1,3}(\.[0-9]{1,4})?$")
+HF_STAND = {"vorgeschlagen": "wartet auf deine Freigabe", "freigegeben": "freigegeben, wird bestellt",
+            "bestellt": "wird erzeugt", "fertig": "fertig", "verworfen": "verworfen", "fehler": "gescheitert",
+            "vorbereitung": "Vorschlag wird vorbereitet"}
+HF_CHIP = {"vorgeschlagen": "bereich", "fehler": "fehler", "fertig": "gut"}
+HF_MODELL = {"kling3_0": "Kling 3.0"}
+HF_NUR_MIT_ANMELDUNG = "Higgsfield-Übergänge freigeben geht nur mit Anmeldung."
+HF_AUSGANG_OFFEN = ("Die Marketing-API hat nicht geantwortet. Ob dein Klick ankam, ist offen. Bitte lade die Seite neu "
+                    "und sieh dir den Stand des Übergangs an, bevor du noch einmal klickst.")
 AUFTRAG_STAND = {"offen": "bestellt", "in_arbeit": "wird vorbereitet", "werkbank": "in der Werkbank",
                  "erzeugt": "Video ist fertig", "wartet_freigabe": "wartet auf deine Freigabe", "fertig": "fertig",
                  "abgebrochen": "abgebrochen", "fehler": "fehlgeschlagen", "abgelaufen": "abgelaufen"}
@@ -75,7 +85,11 @@ HINWEISE = {"ueberholt": ("hinweis", "Diese Fassung ist überholt."),
             "versucht": ("meta", "Die Szene wird noch einmal versucht."),
             "geoeffnet": ("meta", "Die Szene ist wieder offen."),
             "neu": ("meta", "Danke – das wird mit deinem Wunsch neu geschrieben."),
-            "neu_bauen": ("meta", "Das Video wird neu zusammengefügt.")}
+            "neu_bauen": ("meta", "Das Video wird neu zusammengefügt."),
+            "hf_erzeugen": ("meta", "Freigegeben. Der Clip wird jetzt bei Higgsfield bestellt."),
+            "hf_verworfen": ("meta", "Verworfen. An der Stelle bleibt ein normaler Schnitt."),
+            "hf_nochmal": ("meta", "Der neue Vorschlag steht unten. Bestellt ist noch nichts."),
+            "hf_ohne": ("meta", "Verstanden, an der Stelle bleibt ein normaler Schnitt.")}
 
 UEBERGABE_HINWEIS = "Was im Konzept steht, geht an das Videomodell und kann im Video landen."
 UEBERGABE_NUR_MIT_ANMELDUNG = "Bestätigen geht nur mit Anmeldung."
@@ -140,6 +154,10 @@ _STIL = """<style>
 .wb button, .wb a.knopf { min-height: 48px; padding: .5rem 1.1rem; }
 .wb ul { padding-left: 1.2rem; }
 .wb .wb-szenen a { display: block; padding: .6rem 0; }
+.wb .wb-szenen a.hf-zeile { padding: .2rem 0 .2rem 1.2rem; font-size: .9em; }
+.wb .hf { border: 1px solid var(--rand, #c9c9c9); border-radius: 8px; padding: .2rem .9rem .6rem; margin: .9rem 0; }
+.wb .hf-bilder { display: flex; gap: .5rem; }
+.wb .hf-bilder img { width: 50%; height: auto; min-width: 0; }
 </style>"""
 
 
@@ -604,6 +622,8 @@ def routen(ui) -> list:
         kennung = d.get("gliederung_kennung") if "gliederung_kennung" in d else request.query_params.get("k", "")
         kennung = kennung if isinstance(kennung, str) else ""
         szenen = [s for s in liste(werk.get("szenen")) if isinstance(s, dict)]
+        hf = await hf_lesen(firma, aid) if any(s.get("uebergang") == "higgsfield" for s in szenen) else None
+        hf_je_nr = hf_stellen(hf)
         fertig = sum(1 for s in szenen if s.get("stand") == "fertig")
         warten = sum(1 for s in szenen if s.get("stand") in WARTET)
         gl_grund = kurztext(werk.get("gliederung_aufgegeben"))
@@ -621,9 +641,14 @@ def routen(ui) -> list:
                     continue
                 aufgegeben = (' <span class="chip fehler">braucht deinen Wunsch</span>'
                               if s.get("stand") == "geplant" and kurztext(s.get("aufgegeben")) else "")
+                if nr in hf_je_nr:                # der Uebergang steht in der Liste VOR der Szene, in die er fuehrt
+                    st = hf_je_nr[nr]
+                    zeilen.append(f'<a class="hf-zeile" href="#hf-{nr}">Übergang (Higgsfield) '
+                                  f'<span class="chip {HF_CHIP.get(st, "offen")}">{e(HF_STAND.get(st, st))}</span></a>')
                 zeilen.append(f'<a href="{e(seite_url(aid, str(nr)))}"><b>Szene {nr}</b> {e(str(s.get("kurz") or ""))} '
                               f'{stand_chip(str(s.get("stand") or ""), bool(s.get("fehler")))}{aufgegeben}</a>')
             teile.append(f'<h2>Szenen</h2><div class="wb-szenen">{"".join(zeilen)}</div>')
+        teile.append(hf_html(request, aid, hf))
         teile.append(neu_bauen_html(aid, werk))
         if werk.get("alle_fertig") is True:
             teile.append(f'<p><a class="knopf primaer" href="{e(BASIS)}/{e(aid)}/video">Zum fertigen Video</a></p>')
@@ -985,6 +1010,228 @@ def routen(ui) -> list:
             return abgelehnt
         return await senden(request, aid, "", f"/werkbank/{aid}/video/neu-bauen", {}, "neu_bauen")
 
+    # --- Higgsfield-Uebergaenge (24.11.2026; vibemind-os Migration 102, Pult-Wege /werkbank/.../hf) --------
+    # Ein Uebergang kostet Credits. Darum bestellt die Werkbank nie selbst: die Seite zeigt je Stelle die beiden
+    # Bilder, den Preis und den Auftragstext in einem Textfeld; erst der Klick "Erzeugen" gibt GENAU DIESEN Clip
+    # frei. Die Aktionen verlangen dasselbe wie das Ja einer Uebergabe: echte Anmeldung, Anfrage von dieser Seite,
+    # CSRF-Marke, Schreibrecht. Geprueft wird in der Marketing-API und in der Datenbank (Stand, Preis, Text).
+
+    def credits(wert) -> str:
+        if isinstance(wert, bool) or not isinstance(wert, (int, float)):
+            return "?"
+        return f"{wert:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+
+    async def hf_lesen(firma: str, aid: str) -> dict | None:
+        """Die Uebergaenge des Videos; None, wenn die Marketing-API sie (noch) nicht kennt oder gerade nicht
+        antwortet - die Seite zeigt dann alles andere wie bisher."""
+        try:
+            d = await api("GET", f"/werkbank/{aid}/hf?{urllib.parse.urlencode({'mandant': firma})}")
+        except marketing_pult.PultFehler:
+            return None
+        return d if isinstance(d, dict) and isinstance(d.get("clips"), list) else None
+
+    def hf_stellen(hf: dict | None) -> dict[int, str]:
+        """nach_nr -> kurzer Stand fuer die Szenenliste."""
+        if not hf:
+            return {}
+        aus: dict[int, str] = {}
+        for nr in liste(hf.get("vorbereitung")):
+            if isinstance(nr, int) and not isinstance(nr, bool):
+                aus[nr] = "vorbereitung"
+        for c in liste(hf.get("clips")):
+            if isinstance(c, dict) and isinstance(c.get("nach_nr"), int) and not isinstance(c.get("nach_nr"), bool):
+                aus[c["nach_nr"]] = str(c.get("stand") or "")
+        return aus
+
+    def hf_formkopf(aktion_: str, aid: str, felder: dict) -> str:
+        versteckt = "".join(f'<input type="hidden" name="{e(k)}" value="{e(str(v))}">' for k, v in felder.items())
+        return f'<form method="post" action="/aktion/{aktion_}">{csrf()}<input type="hidden" name="aid" value="{e(aid)}">{versteckt}'
+
+    def hf_textfeld(prompt: str, beschriftung: str) -> str:
+        return (f'<label>{e(beschriftung)}<textarea name="prompt" rows="6" maxlength="{HF_PROMPT_MAX}" required>'
+                f'{e(prompt)}</textarea></label>')
+
+    def hf_bild(name, alt: str) -> str:
+        name = str(name or "")
+        if not medien.WERKBANK_HF_MUSTER.fullmatch(name) or not name.endswith(".jpg"):
+            return ""
+        return f'<img src="{datei_url(name)}" alt="{e(alt)}" loading="lazy">'
+
+    def hf_karte(aid: str, c: dict, darf: bool) -> str:
+        nach, von = c.get("nach_nr"), c.get("von_nr")
+        hid, stand = str(c.get("id") or ""), str(c.get("stand") or "")
+        if not _AID.fullmatch(hid) or not isinstance(nach, int) or isinstance(nach, bool):
+            return ""
+        prompt = sichtbar_machen(str(c.get("prompt") or ""))[:HF_PROMPT_MAX]
+        preis = c.get("preis")
+        teile = [f'<div class="hf" id="hf-{nach}"><h3>Übergang von Szene {e(str(von))} zu Szene {nach}</h3>',
+                 f'<p><span class="chip {HF_CHIP.get(stand, "offen")}">{e(HF_STAND.get(stand, stand))}</span></p>']
+        bilder = hf_bild(c.get("start_bild"), f"Letztes Bild von Szene {von}") + hf_bild(c.get("end_bild"), f"Erstes Bild von Szene {nach}")
+        if bilder:
+            teile.append(f'<div class="hf-bilder">{bilder}</div>')
+        if c.get("hinweis"):
+            teile.append(f'<p class="hinweis">{e(kurztext(c.get("hinweis")))}</p>')
+        modell = HF_MODELL.get(str(c.get("modell") or ""), str(c.get("modell") or ""))
+        meta = f'{e(modell)}, {e(str(c.get("dauer_s")))} Sekunden bestellt, im Film rund 2 Sekunden.'
+        nochmal_form = ""
+        if darf and stand in ("fertig", "fehler", "verworfen") and c.get("aktuell") is True:
+            nochmal_form = (hf_formkopf("werkbank-hf-nochmal", aid, {"hid": hid})
+                            + hf_textfeld(prompt, "Auftragstext für einen neuen Versuch")
+                            + '<div class="aktionen"><button type="submit">Neuen Vorschlag anlegen</button></div>'
+                            + '<p class="meta">Das bestellt noch nichts: Der neue Vorschlag erscheint hier mit Preis '
+                              'und wartet auf deinen Klick.</p></form>')
+        verwerfen = ""
+        if darf and stand in ("vorgeschlagen", "fertig", "fehler"):
+            verwerfen = (hf_formkopf("werkbank-hf-urteil", aid, {"hid": hid, "urteil": "verwerfen"})
+                         + '<div class="aktionen"><button type="submit">Verwerfen (normaler Schnitt)</button></div></form>')
+        if stand == "vorgeschlagen":
+            teile.append(f'<p class="meta">{meta} Bestellt wird erst mit deinem Klick.</p>')
+            if darf and isinstance(preis, (int, float)) and not isinstance(preis, bool):
+                teile.append(hf_formkopf("werkbank-hf-urteil", aid, {"hid": hid, "urteil": "erzeugen", "preis": repr(float(preis))})
+                             + hf_textfeld(prompt, "Auftragstext – so geht er an Higgsfield, du kannst ihn ändern")
+                             + f'<div class="aktionen"><button class="primaer" type="submit">Erzeugen für {credits(preis)} '
+                               'Credits</button></div></form>' + verwerfen)
+            else:
+                teile.append(f'<p class="wb-text">{e(prompt)}</p><p>Preis: {credits(preis)} Credits</p>')
+        elif stand in ("freigegeben", "bestellt"):
+            teile.append(f'<p>Der Clip entsteht bei Higgsfield. Das dauert ein paar Minuten; die Seite zeigt ihn, '
+                         f'sobald er da ist.</p><p class="meta">{meta} Preis: {credits(preis)} Credits.</p>'
+                         f'<p class="wb-text">{e(prompt)}</p>')
+        elif stand == "fertig":
+            datei = str(c.get("datei") or "")
+            if medien.WERKBANK_HF_MUSTER.fullmatch(datei) and datei.endswith(".mp4"):
+                teile.append(f'<video controls preload="metadata" src="{datei_url(datei)}"></video>')
+            teile.append(f'<p class="meta">Gekostet: {credits(c.get("preis_bestellt"))} Credits.</p>')
+            if c.get("aktuell") is not True:
+                teile.append('<p class="hinweis">Eine der beiden Szenen hat sich geändert. Der Übergang wird neu '
+                             'vorgeschlagen, bestellt wird dabei nichts.</p>')
+            teile.append(nochmal_form + verwerfen)
+        elif stand == "fehler":
+            teile.append(f'<p class="warnung">{e(kurztext(c.get("fehler")) or "Der Clip ist gescheitert.")}</p>'
+                         + nochmal_form + verwerfen)
+        elif stand == "verworfen":
+            teile.append('<p>Verworfen: An dieser Stelle bleibt ein normaler Schnitt.</p>' + nochmal_form)
+        teile.append("</div>")
+        return "".join(teile)
+
+    def hf_html(request, aid: str, hf: dict | None) -> str:
+        if not hf:
+            return ""
+        clips = [c for c in liste(hf.get("clips")) if isinstance(c, dict)]
+        offen = [nr for nr in liste(hf.get("vorbereitung")) if isinstance(nr, int) and not isinstance(nr, bool)]
+        if not clips and not offen:
+            return ""
+        darf = darf_entscheiden() and anmeldung_aktiv(request)
+        teile = ['<h2 id="hf">Higgsfield-Übergänge</h2>',
+                 '<p class="meta">Jeder Übergang kostet Credits und wird erst nach deinem Klick bestellt. Solange einer '
+                 'offen ist, wird das Video nicht zusammengefügt.</p>']
+        if not darf and darf_schreiben():
+            teile.append(f'<p class="hinweis">{e(HF_NUR_MIT_ANMELDUNG)}</p>')
+        teile += [hf_karte(aid, c, darf) for c in clips]
+        for nr in offen:
+            knopf = ""
+            if darf:
+                knopf = (hf_formkopf("werkbank-hf-ohne", aid, {"nr": nr})
+                         + '<div class="aktionen"><button type="submit">Ohne Übergang weiter</button></div></form>')
+            teile.append(f'<div class="hf" id="hf-{nr}"><h3>Übergang vor Szene {nr}</h3>'
+                         f'<p>Der Vorschlag wird vorbereitet (Bilder, Auftragstext, Preis).</p>{knopf}</div>')
+        bestellt = hf.get("bestellt")
+        if isinstance(bestellt, int) and not isinstance(bestellt, bool) and bestellt > 0:
+            teile.append(f'<p>Bisher bestellt: {bestellt} {"Clip" if bestellt == 1 else "Clips"}, '
+                         f'{credits(hf.get("credits"))} Credits.</p>')
+        return "".join(teile)
+
+    async def hf_kopf(request):
+        """Gemeinsamer Kopf der Higgsfield-Aktionen: -> (form, aid, None) oder (None, None, Fehlerseite). Verlangt
+        (in dieser Reihenfolge) echte Anmeldung, Anfrage von dieser Seite, CSRF-Marke und Schreibrecht."""
+        if not anmeldung_aktiv(request):
+            return None, None, ui._fehlerseite(403, "Nicht angemeldet", HF_NUR_MIT_ANMELDUNG + " Nichts wurde bestellt.")
+        if not gleiche_herkunft(request):
+            return None, None, ui._fehlerseite(403, "Abgewiesen", "Die Anfrage kommt nicht von dieser Seite.")
+        form = await request.form()
+        if not ui._csrf_ok(form):
+            return None, None, ui._fehlerseite(403, "Abgewiesen", "Fehlende oder falsche CSRF-Marke.")
+        if not darf_entscheiden():
+            return None, None, ui._fehlerseite(403, "Nicht erlaubt", "Diese Anmeldung darf hier nichts ändern.")
+        aid = str(form.get("aid") or "")
+        if not _AID.fullmatch(aid):
+            return None, None, nicht_gefunden()
+        if not ui_reels.eigene_firma():
+            return None, None, keine_firma()
+        return form, aid, None
+
+    def hf_prompt_aus(form) -> str | None:
+        """Der Auftragstext aus dem Formular, einzeilig; None, wenn er leer, zu lang oder mit Steuerzeichen ist."""
+        text = " ".join(str(form.get("prompt") or "").split())
+        if not text or len(text) > HF_PROMPT_MAX or any(unicodedata.category(z) in _UNSICHTBAR for z in text):
+            return None
+        return text
+
+    def hf_text_falsch():
+        return ui._fehlerseite(422, "Nicht möglich", f"Der Auftragstext braucht 1 bis {HF_PROMPT_MAX} Zeichen ohne "
+                               "unsichtbare Zeichen. Nichts wurde bestellt.")
+
+    async def hf_senden(request, aid: str, pfad: str, daten: dict, erfolg: str, prompt: str = ""):
+        daten = {**daten, "mandant": ui_reels.eigene_firma(), "von": (ui._ui_akteur(request) or "betreiber-ui")[:60]}
+        ziel = f"{seite_url(aid)}#hf"
+        try:
+            await api("POST", pfad, daten)
+        except marketing_pult.PultFehler as f:
+            if f.art == "abgelehnt":
+                grund = kurztext(f.grund) or "Der Clip ist nicht mehr in diesem Stand."
+                rumpf = (_STIL + f'<div class="wb"><p class="hinweis">Das ging nicht: {e(grund)} Nichts wurde bestellt.</p>'
+                         + (f'<p class="meta">Dein Text steht hier zum Kopieren:</p><textarea readonly rows="6">{e(prompt)}'
+                            '</textarea>' if prompt else "")
+                         + f'<p><a class="knopf primaer" href="{e(ziel)}">Seite neu laden</a></p></div>')
+                return ui._seite("Nicht möglich", rumpf, status=409)
+            if f.art == "nicht_erreichbar":
+                logging.getLogger("sales-ui").error("Higgsfield-Aktion ohne Antwort")
+                return ui._fehlerseite(503, "Ausgang offen", HF_AUSGANG_OFFEN)
+            return fehler(f)
+        return RedirectResponse(f"{seite_url(aid, hinweis=erfolg)}#hf", status_code=303)
+
+    @ui._gesichert_seite
+    async def hf_urteil(request):
+        form, aid, abgelehnt = await hf_kopf(request)
+        if abgelehnt is not None:
+            return abgelehnt
+        hid, art = str(form.get("hid") or ""), str(form.get("urteil") or "")
+        if not _AID.fullmatch(hid) or art not in ("erzeugen", "verwerfen"):
+            return nicht_gefunden()
+        if art == "verwerfen":
+            return await hf_senden(request, aid, f"/werkbank/hf/{hid}/urteil", {"urteil": "verwerfen"}, "hf_verworfen")
+        prompt = hf_prompt_aus(form)
+        if prompt is None:
+            return hf_text_falsch()
+        preis = str(form.get("preis") or "")
+        if not _HF_PREIS.fullmatch(preis):
+            return ui._fehlerseite(422, "Nicht möglich", "Der Preis fehlt. Bitte die Seite neu laden. Nichts wurde bestellt.")
+        return await hf_senden(request, aid, f"/werkbank/hf/{hid}/urteil",
+                               {"urteil": "erzeugen", "prompt": prompt, "preis_gesehen": float(preis)}, "hf_erzeugen", prompt)
+
+    @ui._gesichert_seite
+    async def hf_nochmal(request):
+        form, aid, abgelehnt = await hf_kopf(request)
+        if abgelehnt is not None:
+            return abgelehnt
+        hid = str(form.get("hid") or "")
+        if not _AID.fullmatch(hid):
+            return nicht_gefunden()
+        prompt = hf_prompt_aus(form)
+        if prompt is None:
+            return hf_text_falsch()
+        return await hf_senden(request, aid, f"/werkbank/hf/{hid}/nochmal", {"prompt": prompt}, "hf_nochmal", prompt)
+
+    @ui._gesichert_seite
+    async def hf_ohne(request):
+        form, aid, abgelehnt = await hf_kopf(request)
+        if abgelehnt is not None:
+            return abgelehnt
+        nr = str(form.get("nr") or "")
+        if not _NR.fullmatch(nr):
+            return nicht_gefunden()
+        return await hf_senden(request, aid, f"/werkbank/{aid}/hf/{int(nr)}/ohne", {}, "hf_ohne")
+
     # --- Dateien (Clips und Video) -----------------------------------------------------------
 
     def datei_pruefen(name: str) -> int | None:
@@ -1017,8 +1264,9 @@ def routen(ui) -> list:
     @ui._gesichert_seite
     async def datei(request):
         name = request.path_params["name"]
-        if not medien.WERKBANK_MUSTER.fullmatch(name):
+        if not medien.WERKBANK_MUSTER.fullmatch(name) and not medien.WERKBANK_HF_MUSTER.fullmatch(name):
             return nicht_gefunden()
+        medientyp = "image/jpeg" if name.endswith(".jpg") else "video/mp4"
         firma = ui_reels.eigene_firma()
         if not firma:
             return nicht_gefunden()
@@ -1058,9 +1306,9 @@ def routen(ui) -> list:
             koepfe["Content-Range"] = f"bytes {start}-{ende}/{groesse}"
         koepfe["Content-Length"] = str(ende - start + 1)
         if request.method == "HEAD":
-            return Response(status_code=status, headers=koepfe, media_type="video/mp4")
+            return Response(status_code=status, headers=koepfe, media_type=medientyp)
         return StreamingResponse(stuecke(name, start, ende), status_code=status, headers=koepfe,
-                                 media_type="video/mp4")
+                                 media_type=medientyp)
 
     return [
         Route(BASIS, liste_seite),
@@ -1078,4 +1326,7 @@ def routen(ui) -> list:
         Route("/aktion/werkbank-neu-bauen", neu_bauen, methods=["POST"]),
         Route("/aktion/werkbank-uebergabe-ja", uebergabe_ja, methods=["POST"]),
         Route("/aktion/werkbank-uebergabe-nein", uebergabe_nein, methods=["POST"]),
+        Route("/aktion/werkbank-hf-urteil", hf_urteil, methods=["POST"]),
+        Route("/aktion/werkbank-hf-nochmal", hf_nochmal, methods=["POST"]),
+        Route("/aktion/werkbank-hf-ohne", hf_ohne, methods=["POST"]),
     ]

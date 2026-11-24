@@ -319,6 +319,18 @@ def werkbankdatei(basis: str) -> bool:
 
 _WERKBANK_LOCKER = re.compile(WERKBANK_MUSTER.pattern, re.IGNORECASE)
 
+# Higgsfield-Uebergaenge der Werkbank (24.11.2026; vibemind-os Migration 102): der Uebergang
+# wb-<Auftrag 8 hex>-h<Szene>-f<Versuch>.mp4 und die Standbilder der Szenen-Clips wb-...-s<Szene>-f<Variante>-a.jpg
+# (erstes Bild) und -z.jpg (letztes Bild). Wie die Clips: nur ueber die Werkbank-Seite, kein Medium, kein Anhang.
+# Bewusst NICHT in WERKBANK_MUSTER: das fertige Video eines Auftrags muss weiter auf sNN|video passen (auftrag_bote).
+WERKBANK_HF_MUSTER = re.compile(
+    r"^wb-[0-9a-f]{8}-(?:h[0-9]{2,3}-f[0-9]{1,3}\.mp4|s[0-9]{2,3}-f[0-9]{1,3}-[az]\.jpg)$")
+_WERKBANK_HF_LOCKER = re.compile(WERKBANK_HF_MUSTER.pattern, re.IGNORECASE)
+
+
+def werkbank_hf_datei(basis: str) -> bool:
+    return bool(WERKBANK_HF_MUSTER.match(basis or ""))
+
 
 def werkbankname_verdaechtig(name: str) -> bool:
     """Sieht der Name nach einer Werkbank-Datei aus, auch nach dem, was `pruefe` abstreift oder faltet
@@ -327,7 +339,7 @@ def werkbankname_verdaechtig(name: str) -> bool:
     import urllib.parse
     wert = name or ""
     for _ in range(4):
-        if _WERKBANK_LOCKER.match(wert.strip()):
+        if _WERKBANK_LOCKER.match(wert.strip()) or _WERKBANK_HF_LOCKER.match(wert.strip()):
             return True
         entschluesselt = urllib.parse.unquote(wert)
         if entschluesselt == wert:
@@ -339,7 +351,8 @@ def werkbankname_verdaechtig(name: str) -> bool:
 def verborgen(basis: str) -> bool:
     """Entwurfsbild, Bildstueck, Reel- oder Werkbank-Datei: kein Medium (Listen, Picker, Namenswahl; als
     Anhang sperrt `pruefe_anhang` alle ausser dem Reel-MP4)."""
-    return entwurfsbild(basis) or mailstueck(basis) or reeldatei(basis) or werkbankdatei(basis) or bool(_WERKBANK_LOCKER.match(basis or ""))
+    return (entwurfsbild(basis) or mailstueck(basis) or reeldatei(basis) or werkbankdatei(basis)
+            or bool(_WERKBANK_LOCKER.match(basis or "")) or bool(_WERKBANK_HF_LOCKER.match(basis or "")))
 
 
 def intern(basis: str) -> bool:
@@ -366,7 +379,7 @@ def pruefe_anhang(name: str):
     if reel_vorschaubild(basis):
         return None, (f"'{basis}' ist das Vorschaubild eines Reels und kein Medium - "
                       f"es geht nicht als Anhang.")
-    if werkbankdatei(basis):
+    if werkbankdatei(basis) or werkbank_hf_datei(basis):
         return None, (f"'{basis}' ist ein Clip oder Video der Video-Werkbank und kein Medium - "
                       f"es geht nicht als Anhang.")
     if intern(basis):
