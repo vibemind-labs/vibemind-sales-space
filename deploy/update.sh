@@ -59,7 +59,9 @@ KERN_ALLE="sales-mcp sales-ui sales-inbox sales-dispatch sales-mail sales-claw s
 # starten (VEXA_API_KEY, OLLAMA_URL, TELEGRAM_* gesetzt), danach zieht ihn jedes Update mit.
 # sales-auge (13.11.2026): Beobachter "Laura (Bildschirm)", eigenes Image aus
 # sales-mcp/Dockerfile.auge (eigener Build); erstes Mal von Hand starten.
-KERN_OPTIONAL="sales-post sales-kalender freigabe-bote auftrag-bote sales-termine sales-ki sales-auge"
+# auftrag-abholer (24.11.2026): holt Auftraege des Gehirns ab (docs/12_AUFTRAG_EMPFANG.md); erstes
+# Mal von Hand starten (AUFTRAGSBUCH_LADEN gesetzt), danach zieht ihn jedes Update mit.
+KERN_OPTIONAL="sales-post sales-kalender freigabe-bote auftrag-bote auftrag-abholer sales-termine sales-ki sales-auge"
 
 # Dienstliste ohne die optionalen Dienste (Reihenfolge bleibt).
 ohne_optionale() { # dienstliste
