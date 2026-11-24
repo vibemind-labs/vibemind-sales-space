@@ -30,7 +30,11 @@ ALT="$(git rev-parse HEAD)"
 # Ohne Standdatei gilt der Stand vor dem Vorspulen als der laufende.
 [ -s "$STAND" ] || echo "$ALT" > "$STAND"
 BASIS="$(cat "$STAND")"
-git fetch origin master --quiet
+# Ohne Submodule (23.11.2026): der Checkout ist schlank (nur spaces/marketing
+# u. a.), die Submodule von vibemind-os sind nie ausgecheckt. Aendert origin den
+# Verweis eines davon (spaces/desktop/Automation_ui), bricht ein normales
+# `git fetch` mit "Could not access submodule" ab - die Seite blieb stehen.
+git fetch --no-recurse-submodules origin master --quiet
 git merge --ff-only --quiet origin/master
 # Platzhalter fuer leere Newsletter-Bildplaetze (Spec 2026-09-29-newsletter-
 # bilder §4) in den System-Medienordner des Basis-Ladens. Nur kopieren, was
