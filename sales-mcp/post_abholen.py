@@ -43,6 +43,7 @@ from __future__ import annotations
 import email
 import email.header
 import email.utils
+import imaplib
 import logging
 import os
 import re
@@ -567,30 +568,55 @@ def _kopf_eintragen(conn, z: dict, gelesen: tuple | None) -> bool:
     return geaendert is not None
 
 
-def koepfe_nachlesen(zeile: dict, kasten, stapel: int = KOPF_STAPEL) -> int:
+def _kopf_zeilen(conn, zeile: dict, inbox: bool, stapel: int) -> list:
+    return conn.execute(
+        "select id, imap_uid, message_id, message_id_ersatz, ordner, ordner_uid "
+        "from post_mails where konto_id = %s and richtung = 'eingang' "
+        "and not kopf_nachgelesen and (%s or ordner <> 'INBOX') "
+        "and not (ordner = 'INBOX' and imap_uid < 0) "
+        "order by datum desc nulls last, id desc limit %s",
+        (zeile["id"], inbox, int(stapel))).fetchall()
+
+
+def koepfe_nachlesen(zeile: dict, kasten, stapel: int = KOPF_STAPEL,
+                     fehler: dict | None = None) -> int:
     """Liest fuer hoechstens `stapel` Eingangsmails des Kontos ohne Antwortkoepfe (neueste
     zuerst) In-Reply-To und References nach, nur lesend (EXAMINE, UID FETCH BODY.PEEK der
     Kopfzeilen). Kennungen werden nur uebernommen, wenn die Message-ID unter der UID zur
     gespeicherten passt; sonst, bei fehlender Mail und bei Platzhalter-IDs, wird nur
-    `kopf_nachgelesen` gesetzt. Weicht die UIDVALIDITY von INBOX ab, bleiben die
-    INBOX-Zeilen in dieser Runde liegen. Rueckgabe = markierte Zeilen."""
-    inbox_ok = True
-    post_imap.lesend_waehlen(kasten, "INBOX")
-    aktuell = _uidvalidity(kasten)
+    `kopf_nachgelesen` gesetzt. Weicht die UIDVALIDITY von INBOX ab oder gelingt das
+    Waehlen von INBOX nicht, bleiben die INBOX-Zeilen in dieser Runde liegen. Scheitert
+    ein Ordner, bleiben seine Zeilen offen und die anderen Ordner laufen weiter; nur ein
+    Verbindungsabbruch beendet die Runde. Zeilen ausserhalb von INBOX ohne gueltige
+    `ordner_uid` werden nur markiert (kein Abruf moeglich). Fehler zaehlt `fehler["n"]`.
+    Rueckgabe = markierte Zeilen."""
+    fehler = fehler if fehler is not None else {}
+    fehler.setdefault("n", 0)
     with server.pool.connection() as conn:
-        # Frisch lesen: konto_abholen kann den Wert in dieser Runde erneuert haben.
-        gespeichert = conn.execute("select uidvalidity from post_konten where id = %s",
-                                   (zeile["id"],)).fetchone()
-        gespeichert = gespeichert["uidvalidity"] if gespeichert else None
-        if aktuell is not None and gespeichert is not None and aktuell != gespeichert:
-            inbox_ok = False
-        zeilen = conn.execute(
-            "select id, imap_uid, message_id, message_id_ersatz, ordner, ordner_uid "
-            "from post_mails where konto_id = %s and richtung = 'eingang' "
-            "and not kopf_nachgelesen and (%s or ordner <> 'INBOX') "
-            "and not (ordner = 'INBOX' and imap_uid < 0) "
-            "order by datum desc nulls last, id desc limit %s",
-            (zeile["id"], inbox_ok, int(stapel))).fetchall()
+        zeilen = _kopf_zeilen(conn, zeile, True, stapel)
+        if any(z["ordner"] == "INBOX" for z in zeilen):
+            inbox_ok = True
+            try:
+                post_imap.lesend_waehlen(kasten, "INBOX")
+                aktuell = _uidvalidity(kasten)
+                # Frisch lesen: konto_abholen kann den Wert in dieser Runde erneuert haben.
+                gespeichert = conn.execute("select uidvalidity from post_konten where id = %s",
+                                           (zeile["id"],)).fetchone()
+                gespeichert = gespeichert["uidvalidity"] if gespeichert else None
+                if aktuell is not None and gespeichert is not None and aktuell != gespeichert:
+                    inbox_ok = False
+                    LOG.info("Konto %s: %d INBOX-Zeilen uebersprungen (uidvalidity)",
+                             zeile["kennung"],
+                             sum(1 for z in zeilen if z["ordner"] == "INBOX"))
+            except (imaplib.IMAP4.abort, OSError):
+                raise
+            except Exception as e:  # noqa: BLE001 - INBOX kostet nicht die anderen Ordner
+                inbox_ok = False
+                fehler["n"] += 1
+                LOG.warning("Konto %s: INBOX fuer Antwortkoepfe nicht waehlbar (%s)",
+                            zeile["kennung"], type(e).__name__)
+            if not inbox_ok:
+                zeilen = _kopf_zeilen(conn, zeile, False, stapel)
     if not zeilen:
         return 0
     je_ordner: dict[str, list[dict]] = {}
@@ -604,6 +630,17 @@ def koepfe_nachlesen(zeile: dict, kasten, stapel: int = KOPF_STAPEL) -> int:
                 gelesen = post_imap.antwortkoepfe_lesen(kasten, ordner, uids)
             except post_imap.Fehlt:
                 gelesen = {}          # Ordner gibt es nicht mehr: die Mail ist nicht zu finden
+            except (imaplib.IMAP4.abort, OSError) as e:
+                # Die Verbindung ist hin: Rest der Runde aufgeben, Zeilen bleiben offen.
+                fehler["n"] += 1
+                LOG.warning("Konto %s: Verbindung beim Nachlesen verloren (%s)",
+                            zeile["kennung"], type(e).__name__)
+                break
+            except Exception as e:  # noqa: BLE001 - ein Ordner haelt die anderen nicht auf
+                fehler["n"] += 1
+                LOG.warning("Konto %s: Antwortkoepfe eines Ordners nicht gelesen (%s)",
+                            zeile["kennung"], type(e).__name__)
+                continue
             for z in gruppe:
                 uid = _kopf_ort(z)[1]
                 if _kopf_eintragen(conn, z, gelesen.get(uid) if uid is not None else None):
@@ -971,7 +1008,11 @@ def eine_runde() -> dict:
                                     zeile["kennung"], type(e).__name__)
                 if not _STOPP.is_set():
                     try:
-                        bilanz["koepfe"] += koepfe_nachlesen(zeile, kasten)
+                        stoerung: dict = {"n": 0}
+                        try:
+                            bilanz["koepfe"] += koepfe_nachlesen(zeile, kasten, fehler=stoerung)
+                        finally:
+                            bilanz["koepfe_fehler"] += stoerung["n"]
                     except Exception as e:  # noqa: BLE001 - kostet weder INBOX noch Gesendet
                         bilanz["koepfe_fehler"] += 1
                         LOG.warning("Konto %s: Antwortkoepfe nachlesen fehlgeschlagen (%s)",

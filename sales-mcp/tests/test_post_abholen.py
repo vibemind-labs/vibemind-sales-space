@@ -88,6 +88,10 @@ class Attrappe:
         self.geholt = []
         self.verboten = []
         self.ablehnen = set()      # UIDs, deren naechster Abruf mit NO endet
+        self.kopf_fehler = {}      # Ordner -> Ausnahme, die der Kopf-Abruf dort wirft
+        self.uid_nach_literal = False   # UID steht hinter dem Literal statt davor
+        self.kopf_roh = {}              # UID -> Kopftext unveraendert (Leerraum, Klammern)
+        self.uid_nirgends = False       # Antwort ohne erkennbare UID
         self.befehle = []          # jeder UID-Befehl: (Ordner, Befehl, UID-Menge, Datenteil)
 
     @staticmethod
@@ -141,6 +145,8 @@ class Attrappe:
             self.befehle.append((self.gewaehlt, befehl, str(args[0]),
                                  args[1] if len(args) > 1 else ""))
             if "BODY.PEEK[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO REFERENCES)]" in str(args[-1]):
+                if self.gewaehlt in self.kopf_fehler:
+                    raise self.kopf_fehler[self.gewaehlt]
                 antwort = []
                 for uid in sorted(int(u) for u in str(args[0]).split(",")):
                     roh = mails.get(uid)
@@ -149,10 +155,20 @@ class Attrappe:
                     kopf = email.message_from_bytes(roh)
                     text = "".join(f"{n}: {kopf[n]}\r\n" for n in
                                    ("Message-ID", "In-Reply-To", "References") if kopf[n])
-                    antwort.append((f"1 (UID {uid} BODY[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO "
-                                    f"REFERENCES)] {{{len(text)}}}".encode(),
-                                    (text + "\r\n").encode()))
-                    antwort.append(b")")
+                    text = self.kopf_roh.get(uid, text)
+                    feld = "BODY[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO REFERENCES)]"
+                    if self.uid_nirgends:
+                        antwort.append((f"1 ({feld} {{{len(text)}}}".encode(),
+                                        (text + "\r\n").encode()))
+                        antwort.append(b")")
+                    elif self.uid_nach_literal:
+                        antwort.append((f"1 ({feld} {{{len(text)}}}".encode(),
+                                        (text + "\r\n").encode()))
+                        antwort.append(f" UID {uid})".encode())
+                    else:
+                        antwort.append((f"1 (UID {uid} {feld} {{{len(text)}}}".encode(),
+                                        (text + "\r\n").encode()))
+                        antwort.append(b")")
                 return "OK", antwort or [None]
             uid = int(args[0])
             self.geholt.append(uid)

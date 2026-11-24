@@ -404,10 +404,106 @@ def test_runde_trennt_kopf_fehler(monkeypatch):
     kasten = Attrappe({})
     monkeypatch.setattr(post_abholen.post_konten, "verbinden", lambda z: kasten)
     monkeypatch.setattr(post_abholen, "koepfe_nachlesen",
-                        lambda z, k: (_ for _ in ()).throw(RuntimeError("x")))
+                        lambda z, k, **kw: (_ for _ in ()).throw(RuntimeError("x")))
     monkeypatch.setattr(post_abholen, "_einordnen", lambda b: None)
     monkeypatch.setattr(post_abholen, "_unterhaltungen_nachziehen", lambda b: None)
     monkeypatch.setattr(post_abholen, "_anweisungen_nachziehen", lambda b: None)
     monkeypatch.setattr(post_abholen, "_aufraeumen", lambda b: None)
     bilanz = post_abholen.eine_runde()
     assert bilanz["koepfe_fehler"] == 1 and bilanz["koepfe"] == 0 and bilanz["konten_fehler"] == 0
+
+
+# --- Fix round 1 -------------------------------------------------------------------
+
+@pytest.mark.parametrize("nach_literal", [False, True], ids=["uid-vor-literal", "uid-nach-literal"])
+def test_uid_vor_oder_nach_dem_literal(nach_literal):
+    konto = _konto()
+    alt = _alt(konto, 7, "m7@x")
+    kasten = Attrappe({7: _antwort("<m7@x>", in_reply_to="<s1@x>")})
+    kasten.uid_nach_literal = nach_literal
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten) == 1
+    assert _zeile_id(alt)["in_reply_to"] == "s1@x"
+
+
+def test_antwort_ohne_erkennbare_uid_laesst_zeilen_offen():
+    konto = _konto()
+    alt = _alt(konto, 7, "m7@x")
+    kasten = Attrappe({7: _antwort("<m7@x>", in_reply_to="<s1@x>")})
+    kasten.uid_nirgends = True
+    fehler = {}
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten, fehler=fehler) == 0
+    assert _zeile_id(alt)["kopf_nachgelesen"] is False and fehler["n"] == 1
+
+
+def test_ordnerfehler_stoppt_die_anderen_ordner_nicht():
+    konto = _konto()
+    a = _alt(konto, 3, "a@x", ordner="Alpha", ordner_uid=1, datum="2026-10-05T10:00:00Z")
+    b = _alt(konto, 4, "b@x", ordner="Beta", ordner_uid=2, datum="2026-10-01T10:00:00Z")
+    kasten = Attrappe({}, ordner={"Alpha": {1: _antwort("<a@x>")},
+                                  "Beta": {2: _antwort("<b@x>", in_reply_to="<s1@x>")}})
+    kasten.kopf_fehler["Alpha"] = RuntimeError("busy")
+    fehler = {}
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten, fehler=fehler) == 1
+    assert _zeile_id(a)["kopf_nachgelesen"] is False
+    assert _zeile_id(b)["in_reply_to"] == "s1@x" and fehler["n"] == 1
+
+
+def test_verbindungsabbruch_beendet_sauber():
+    import imaplib
+    konto = _konto()
+    a = _alt(konto, 3, "a@x", ordner="Alpha", ordner_uid=1, datum="2026-10-05T10:00:00Z")
+    b = _alt(konto, 4, "b@x", ordner="Beta", ordner_uid=2, datum="2026-10-01T10:00:00Z")
+    kasten = Attrappe({}, ordner={"Alpha": {1: _antwort("<a@x>")}, "Beta": {2: _antwort("<b@x>")}})
+    kasten.kopf_fehler["Alpha"] = imaplib.IMAP4.abort("socket error")
+    fehler = {}
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten, fehler=fehler) == 0
+    assert fehler["n"] == 1
+    assert _zeile_id(a)["kopf_nachgelesen"] is False and _zeile_id(b)["kopf_nachgelesen"] is False
+    assert {o for o, *_ in kasten.befehle} == {"Alpha"}   # Beta wurde nicht mehr angefasst
+
+
+def test_inbox_select_scheitert_andere_ordner_laufen():
+    konto = _konto()
+    inbox = _alt(konto, 7, "m7@x")
+    moved = _alt(konto, 8, "m8@x", ordner="Zur Info", ordner_uid=2)
+    kasten = Attrappe({7: _antwort("<m7@x>")}, ordner={"Zur Info": {2: _antwort("<m8@x>")}},
+                      select_nein={"INBOX"})
+    fehler = {}
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten, fehler=fehler) == 1
+    assert _zeile_id(inbox)["kopf_nachgelesen"] is False
+    assert _zeile_id(moved)["kopf_nachgelesen"] is True and fehler["n"] == 1
+
+
+def test_nur_verschobene_zeilen_waehlen_inbox_nicht():
+    konto = _konto()
+    _alt(konto, 8, "m8@x", ordner="Zur Info", ordner_uid=2)
+    kasten = Attrappe({}, ordner={"Zur Info": {2: _antwort("<m8@x>")}})
+    post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten)
+    assert all("INBOX" not in m for m, _r in kasten.selects) and kasten.selects
+
+
+def test_fehlender_ordner_markiert_die_zeilen():
+    konto = _konto()
+    z = _alt(konto, 8, "m8@x", ordner="Weg", ordner_uid=2)
+    kasten = Attrappe({})
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten) == 1
+    assert _zeile_id(z)["kopf_nachgelesen"] is True and kasten.befehle == []
+
+
+@pytest.mark.parametrize("uid", [None, 0, -4])
+def test_verschobene_zeile_ohne_gueltige_ordner_uid(uid):
+    """Kein Abruf moeglich: nur markiert, blockiert den Stapel nicht."""
+    konto = _konto()
+    z = _alt(konto, 8, "m8@x", ordner="Zur Info", ordner_uid=uid)
+    kasten = Attrappe({}, ordner={"Zur Info": {}})
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten) == 1
+    assert _zeile_id(z)["kopf_nachgelesen"] is True and kasten.befehle == []
+
+
+def test_message_id_vergleich_ignoriert_klammern_und_leerraum():
+    konto = _konto()
+    alt = _alt(konto, 7, "ABC@x")
+    kasten = Attrappe({7: _antwort("<ABC@x>")})
+    kasten.kopf_roh[7] = "Message-ID:  <ABC@x> \r\nIn-Reply-To: <s@x>\r\n"
+    assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten) == 1
+    assert _zeile_id(alt)["in_reply_to"] == "s@x"

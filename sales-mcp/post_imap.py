@@ -431,11 +431,19 @@ def antwortkoepfe_lesen(kasten, ordner: str, uids: list[int]
     daten = _ok(kasten.uid("FETCH", ",".join(map(str, nummern)), _KOPF_FELDER), "UID FETCH")
     gefragt = set(nummern)
     ergebnis: dict[int, tuple[str | None, str | None, str | None]] = {}
-    for teil in daten or ():
+    teile = list(daten or ())
+    mit_daten = parsbar = 0
+    for i, teil in enumerate(teile):
         if not (isinstance(teil, tuple) and len(teil) >= 2 and teil[1] is not None):
             continue
-        treffer = _UID_IN_ANTWORT.search(teil[0] or b"")
-        if treffer is None or int(treffer.group(1)) not in gefragt:
+        mit_daten += 1
+        # Die UID steht je nach Server vor dem Literal (Tupelkopf) oder dahinter (Rest).
+        nachlauf = teile[i + 1] if i + 1 < len(teile) and isinstance(teile[i + 1], bytes) else b""
+        treffer = (_UID_IN_ANTWORT.search(teil[0] or b"") or _UID_IN_ANTWORT.search(nachlauf))
+        if treffer is None:
+            continue
+        parsbar += 1
+        if int(treffer.group(1)) not in gefragt:
             continue        # ungefragte FETCH-Antwort einer anderen Mail
         kopf = email.message_from_bytes(teil[1])
 
@@ -446,4 +454,7 @@ def antwortkoepfe_lesen(kasten, ordner: str, uids: list[int]
         mid = roh("Message-ID")
         ergebnis[int(treffer.group(1))] = (
             mid.strip("<>")[:_KOPF_MAX] if mid else "", roh("In-Reply-To"), roh("References"))
+    if mit_daten and not parsbar:
+        # Der Server antwortete, aber keine UID ist zu erkennen: nicht als "fehlt" werten.
+        raise ImapFehler("UID FETCH nicht lesbar")
     return ergebnis
