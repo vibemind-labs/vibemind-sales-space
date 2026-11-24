@@ -373,7 +373,9 @@ def ordner_groesse(kasten, ordner: str) -> int | None:
         return None
     for teil in daten or ():
         roh = teil.decode("utf-8", errors="replace") if isinstance(teil, bytes) else str(teil or "")
-        treffer = re.search(r"\bMESSAGES\s+(\d+)", roh)
+        # Nur die Klammerliste am Ende: der Ordnername steht davor und darf nicht zaehlen.
+        klammer = re.search(r"\(([^()]*)\)\s*$", roh)
+        treffer = re.search(r"\bMESSAGES\s+(\d+)", klammer.group(1)) if klammer else None
         if treffer:
             return int(treffer.group(1))
     return None

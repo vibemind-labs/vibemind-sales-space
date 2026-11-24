@@ -219,6 +219,9 @@ def _mail_zerlegen(nachricht, kennung: str, uid: int, konto_adresse: str = "") -
         "in_reply_to": antwort_auf[0] if antwort_auf else None, "referenzen": referenzen,
         # Sensibel: weder Empfaenger noch Anhaenge speichern (Spec §5).
         "an": None if sensibel_treffer else _rein(postfach._kopf(nachricht, "To"), KOPF_MAX),
+        # Nur fuer die Sensibel-Pruefung gesendeter Mails (S3): To, Cc und Bcc; keine Spalte.
+        "empfaenger_roh": " ".join(
+            _rein(postfach._kopf(nachricht, k), KOPF_MAX) or "" for k in ("To", "Cc", "Bcc")),
         "betreff": betreff, "datum": _datum(postfach._kopf(nachricht, "Date")),
         "text": text, "auszug": auszug, "anhaenge": [] if sensibel_treffer else _anhaenge(nachricht),
         # Die Kopfzeilen sind schon da: kein zusaetzlicher Abruf. '' = geprueft, keine
@@ -292,7 +295,8 @@ def _uidvalidity_pruefen(zeile: dict, aktuell: int | None, richtung: str = "eing
         return letzte
     with server.pool.connection() as conn, conn.transaction():
         if gespeichert is not None or neu_anfangen:
-            LOG.info("Konto %s: UIDVALIDITY geaendert - hole neu", zeile["kennung"])
+            LOG.info("Konto %s: %s - Grund %s - hole neu", zeile["kennung"], richtung,
+                     "ordnerwechsel" if neu_anfangen else "uidvalidity")
             # Alte UIDs gelten nicht mehr: unter alle vorhandenen Platzhalter
             # schieben (eindeutig, auch nach mehreren Wechseln), damit die neuen
             # UIDs frei sind. Die Zeilen selbst bleiben (nie loeschen). Nur die
@@ -371,7 +375,9 @@ def _speichern(zeile: dict, uid: int, mail: dict | None, richtung: str = "eingan
                     # Ruling S3: der Absender ist Felix - die festen Muster gelten fuer
                     # Empfaenger und Betreff (der Treffer ueber `von` bleibt mit drin,
                     # damit nichts weniger gilt als beim Zerlegen).
-                    sensibel = (_sensibel_nach_muster(an or "", mail["betreff"] or "")
+                    empfaenger = " ".join(
+                        t for t in (an, mail.get("empfaenger_roh")) if t)
+                    sensibel = (_sensibel_nach_muster(empfaenger, mail["betreff"] or "")
                                 or _sensibel_nach_muster(mail["von"] or "", mail["betreff"] or ""))
                     if sensibel:
                         an = text = auszug = herkunft = None
@@ -422,6 +428,41 @@ def _speichern(zeile: dict, uid: int, mail: dict | None, richtung: str = "eingan
     return neu
 
 
+def _uids_abholen(kasten, zeile: dict, letzte: int, stapel: int, richtung: str,
+                  wort: str) -> tuple[int, bool, bool]:
+    """Der gemeinsame Abholschritt beider Richtungen, im schon (lesend) gewaehlten Ordner:
+    hoechstens `stapel` UIDs oberhalb von `letzte`, aelteste zuerst, je Mail zerlegen
+    (unlesbar -> Platzhalter) und in EINER Transaktion mit dem Stand speichern.
+    Rueckgabe: (neu gespeichert, Stapel deckt den ganzen Rest ab, abgebrochen durch _STOPP).
+    `wort` steht nur im Protokoll ("Mail" / "gesendete Mail")."""
+    status, daten = kasten.uid("search", None, f"UID {letzte + 1}:*")
+    if status != "OK":
+        raise RuntimeError("IMAP-Suche abgelehnt")
+    # "n:*" liefert auf echtem IMAP immer mindestens die hoechste UID, auch
+    # wenn sie kleiner als n ist - darum hier nachfiltern.
+    offen = sorted(u for u in (int(x) for x in (daten[0] or b"").split()) if u > letzte)
+    dieser_stapel = offen[:max(1, int(stapel))]
+    neu = 0
+    for uid in dieser_stapel:
+        if _STOPP.is_set():
+            return neu, False, True
+        nachricht = _holen(kasten, uid)
+        mail = None
+        if nachricht is None:
+            LOG.info("Konto %s: %s UID %s ohne Inhalt (entfernt) - uebersprungen",
+                     zeile["kennung"], richtung, uid)
+        else:
+            try:
+                mail = _mail_zerlegen(nachricht, zeile["kennung"], uid,
+                                      zeile.get("adresse") or "")
+            except Exception as e:  # noqa: BLE001 - sonst haengt das Konto ewig an dieser UID
+                LOG.warning("Konto %s: %s %s nicht lesbar (%s)", zeile["kennung"], wort, uid,
+                            type(e).__name__)
+                mail = _unlesbar(zeile["kennung"], uid, type(e).__name__)
+        neu += 1 if _speichern(zeile, uid, mail, richtung) else 0
+    return neu, len(dieser_stapel) == len(offen), False
+
+
 def konto_abholen(zeile: dict, kasten=None, stapel: int = 50) -> int:
     """Holt hoechstens `stapel` neue Mails eines Kontos; Rueckgabe = neu gespeichert."""
     eigener = kasten is None
@@ -430,32 +471,9 @@ def konto_abholen(zeile: dict, kasten=None, stapel: int = 50) -> int:
     try:
         kasten.select("INBOX", readonly=True)
         letzte = _uidvalidity_pruefen(zeile, _uidvalidity(kasten))
-        status, daten = kasten.uid("search", None, f"UID {letzte + 1}:*")
-        if status != "OK":
-            raise RuntimeError("IMAP-Suche abgelehnt")
-        # "n:*" liefert auf echtem IMAP immer mindestens die hoechste UID, auch
-        # wenn sie kleiner als n ist - darum hier nachfiltern.
-        offen = sorted(u for u in (int(x) for x in (daten[0] or b"").split()) if u > letzte)
-        dieser_stapel = offen[:max(1, int(stapel))]
-        neu = 0
-        for uid in dieser_stapel:
-            if _STOPP.is_set():
-                return neu
-            nachricht = _holen(kasten, uid)
-            mail = None
-            if nachricht is None:
-                LOG.info("Konto %s: UID %s ohne Inhalt (entfernt) - uebersprungen",
-                         zeile["kennung"], uid)
-            else:
-                try:
-                    mail = _mail_zerlegen(nachricht, zeile["kennung"], uid,
-                                          zeile.get("adresse") or "")
-                except Exception as e:  # noqa: BLE001 - sonst haengt das Konto ewig an dieser UID
-                    LOG.warning("Konto %s: Mail %s nicht lesbar (%s)", zeile["kennung"], uid,
-                                type(e).__name__)
-                    mail = _unlesbar(zeile["kennung"], uid, type(e).__name__)
-            neu += 1 if _speichern(zeile, uid, mail) else 0
-        if len(dieser_stapel) == len(offen):
+        neu, fertig, _abgebrochen = _uids_abholen(kasten, zeile, letzte, stapel, "eingang",
+                                                  "Mail")
+        if fertig:
             with server.pool.connection() as conn:
                 conn.execute("update post_konten set altbestand_fertig = true "
                              "where id = %s and not altbestand_fertig", (zeile["id"],))
@@ -491,31 +509,9 @@ def gesendet_abholen(zeile: dict, kasten, stapel: int = GESENDET_STAPEL) -> int:
                    "uidvalidity": stand["uidvalidity"] if stand else None,
                    "letzte_uid": stand["letzte_uid"] if stand else None})
     letzte = _uidvalidity_pruefen(arbeit, _uidvalidity(kasten), "gesendet", umbenannt)
-    status, daten = kasten.uid("search", None, f"UID {letzte + 1}:*")
-    if status != "OK":
-        raise RuntimeError("IMAP-Suche abgelehnt")
-    # "n:*" liefert auf echtem IMAP immer mindestens die hoechste UID - nachfiltern.
-    offen = sorted(u for u in (int(x) for x in (daten[0] or b"").split()) if u > letzte)
-    dieser_stapel = offen[:max(1, int(stapel))]
-    neu = 0
-    for uid in dieser_stapel:
-        if _STOPP.is_set():
-            return neu
-        nachricht = _holen(kasten, uid)
-        mail = None
-        if nachricht is None:
-            LOG.info("Konto %s: gesendet UID %s ohne Inhalt (entfernt) - uebersprungen",
-                     zeile["kennung"], uid)
-        else:
-            try:
-                mail = _mail_zerlegen(nachricht, zeile["kennung"], uid,
-                                      zeile.get("adresse") or "")
-            except Exception as e:  # noqa: BLE001 - sonst haengt das Konto ewig an dieser UID
-                LOG.warning("Konto %s: gesendete Mail %s nicht lesbar (%s)", zeile["kennung"],
-                            uid, type(e).__name__)
-                mail = _unlesbar(zeile["kennung"], uid, type(e).__name__)
-        neu += 1 if _speichern(arbeit, uid, mail, "gesendet") else 0
-    if len(dieser_stapel) == len(offen):
+    neu, fertig, _abgebrochen = _uids_abholen(kasten, arbeit, letzte, stapel, "gesendet",
+                                              "gesendete Mail")
+    if fertig:
         with server.pool.connection() as conn:
             conn.execute(
                 "insert into post_ordner_stand (konto_id, richtung, ordner, altbestand_fertig) "

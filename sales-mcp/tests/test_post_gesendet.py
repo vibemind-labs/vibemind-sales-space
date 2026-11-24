@@ -22,11 +22,14 @@ ORDNER = "Gesendet"
 
 
 def _raus(message_id="<g1@x>", an="Anna Beispiel <anna@example.org>", betreff="Angebot",
-          text="Hallo Anna, anbei das Angebot.", datum="Mon, 02 Nov 2026 11:00:00 +0100") -> bytes:
+          text="Hallo Anna, anbei das Angebot.", datum="Mon, 02 Nov 2026 11:00:00 +0100",
+          cc=None) -> bytes:
     m = EmailMessage()
     m["From"] = "gmx-test@gmx.de"
     m["To"] = an
     m["Subject"] = betreff
+    if cc:
+        m["Cc"] = cc
     m["Date"] = datum
     m["Message-ID"] = message_id
     m.set_content(text)
@@ -67,18 +70,22 @@ def test_gesendete_mails_landen_mit_status_gesendet():
 
 def test_gesendet_zaehlt_nicht_zur_tagesgrenze(monkeypatch):
     _konto()
+    kasten = Attrappe({1: _mail("<e1@x>")}, ordner={ORDNER: {1: _raus("<g1@x>"),
+                                                            2: _raus("<g2@x>")}}, sent=ORDNER)
+    zeile = _zeile("gmx-test")
+    post_abholen.konto_abholen(zeile, kasten)
     vorher = post_abholen.modellaufrufe_heute()
-    kasten = Attrappe({}, ordner={ORDNER: {1: _raus("<g1@x>"), 2: _raus("<g2@x>")}}, sent=ORDNER)
     post_abholen.gesendet_abholen(_zeile("gmx-test"), kasten)
     assert post_abholen.modellaufrufe_heute() == vorher
 
-    def verboten(*a, **k):
-        pytest.fail("fuer gesendete Mails darf kein Modell gerufen werden")
-    monkeypatch.setattr(post_einordnung.einordnen, "__defaults__", (verboten,))
-    monkeypatch.setattr(post_einordnung.nachpruefen, "__defaults__", (verboten,))
-    assert post_abholen.einordnen_offene(10) == 0
+    aufrufe = []
+    monkeypatch.setattr(post_einordnung, "einordnen",
+                        lambda mail, konto: aufrufe.append(mail["id"]) or _einordnung())
+    # Positive Kontrolle: die eingehende `neu`-Zeile wird sortiert, die gesendeten nicht.
+    assert post_abholen.einordnen_offene(10) == 1
+    eingang = _mails("richtung = 'eingang'")[0]
+    assert aufrufe == [str(eingang["id"])] and eingang["status"] == "eingeordnet"
     assert {r["status"] for r in _gesendet_mails()} == {"gesendet"}
-    assert post_abholen.modellaufrufe_heute() == vorher
 
 
 def test_mail_an_mich_selbst_zwei_zeilen():
@@ -197,6 +204,9 @@ def test_ganze_historie_in_stapeln():
 
 
 def test_groessen_ohne_ordnernamen(monkeypatch, capsys):
+    # Kein Logger-/Socket-Zustand darf in andere Tests lecken (propagate=False, Handler).
+    monkeypatch.setattr(post_abholen, "_logging_einrichten", lambda: None)
+    monkeypatch.setattr(post_abholen.socket, "setdefaulttimeout", lambda *a: None)
     _konto("felix", "gmx-test")
     _konto("felix", "ohne-sent")
     raus = {1: _raus(), 2: _raus("<g2@x>"), 3: _raus("<g3@x>")}
@@ -210,3 +220,37 @@ def test_groessen_ohne_ordnernamen(monkeypatch, capsys):
     assert "Meine Post Raus" not in aus
     assert _mails() == [] and _stand() is None          # speichert nichts
     assert all(k.verboten == [] for k in kaesten.values())
+
+
+def test_gesendet_sensibel_nach_cc(monkeypatch):
+    _konto()
+    kasten = Attrappe({}, ordner={ORDNER: {
+        1: _raus("<c1@x>", betreff="Rueckfrage", cc="Bank <security@bank.example>")}}, sent=ORDNER)
+    post_abholen.gesendet_abholen(_zeile("gmx-test"), kasten)
+    r = _gesendet_mails()[0]
+    assert r["sensibel"] is True and r["text"] is None and r["an"] is None
+
+
+def test_unlesbare_gesendete_mail(monkeypatch):
+    _konto()
+    monkeypatch.setattr(post_abholen, "_mail_zerlegen",
+                        lambda *a: (_ for _ in ()).throw(ValueError("kaputt")))
+    kasten = Attrappe({}, ordner={ORDNER: {1: _raus()}}, sent=ORDNER)
+    assert post_abholen.gesendet_abholen(_zeile("gmx-test"), kasten) == 1
+    r = _gesendet_mails()[0]
+    assert r["status"] == "gesendet" and r["fehler"] and r["kopf_nachgelesen"] is False
+    assert _stand()["letzte_uid"] == 1
+
+
+def test_ordner_groesse_liest_nur_die_klammerliste():
+    import post_imap
+
+    class K:
+        def status(self, name, namen):
+            return "OK", [b'"Post MESSAGES 9" (MESSAGES 4)']
+    assert post_imap.ordner_groesse(K(), "Post MESSAGES 9") == 4
+
+    class Ohne:
+        def status(self, name, namen):
+            return "OK", [b'"Post MESSAGES 9" (UIDNEXT 3)']
+    assert post_imap.ordner_groesse(Ohne(), "Post MESSAGES 9") is None
