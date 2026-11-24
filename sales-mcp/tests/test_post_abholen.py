@@ -139,7 +139,7 @@ class Attrappe:
 
 def _mail(message_id="<m1@example.org>", von="Anna Beispiel <anna@example.org>",
           betreff="Angebot", text="Guten Tag, anbei das Angebot.", anhang=None,
-          datum="Mon, 02 Nov 2026 10:00:00 +0100") -> bytes:
+          datum="Mon, 02 Nov 2026 10:00:00 +0100", in_reply_to=None, references=None) -> bytes:
     m = EmailMessage()
     m["From"] = von
     m["To"] = "felix@example.org"
@@ -148,6 +148,10 @@ def _mail(message_id="<m1@example.org>", von="Anna Beispiel <anna@example.org>",
         m["Date"] = datum
     if message_id:
         m["Message-ID"] = message_id
+    if in_reply_to is not None:
+        m["In-Reply-To"] = in_reply_to
+    if references is not None:
+        m["References"] = references
     m.set_content(text)
     if anhang:
         m.add_attachment(b"%PDF-1.4", maintype="application", subtype="pdf", filename=anhang)
@@ -371,6 +375,47 @@ def _einordnung(sensibel=False, quelle="modell"):
     # naechsten Runde in die Nachpruefung, und diese Tests zaehlten Aufrufe, die sie nicht meinen.
     return post_einordnung.Einordnung("business", "Kunden & Anfragen", sensibel, quelle,
                                       "passt", enthaelt_anweisung=False, dringlichkeit="nichts")
+
+
+def test_antwortkoepfe_gespeichert():
+    _konto()
+    mail = _mail("<b@x>", in_reply_to="<a@x>", references="<r1@x> <a@x>")
+    post_abholen.konto_abholen(_zeile("gmx-test"), Attrappe({1: mail}))
+    r = _mails()[0]
+    assert r["in_reply_to"] == "a@x"
+    assert r["referenzen"] == ["r1@x", "a@x"]
+    assert r["kopf_nachgelesen"] is True
+
+
+def test_referenzen_gedeckelt():
+    _konto()
+    ids = [f"<k{i}@x>" for i in range(300)]
+    lang = "<" + "x" * 5000 + "@x>"
+    mail = _mail("<b@x>", references=" ".join(ids[:150] + [lang] + ids[150:]))
+    post_abholen.konto_abholen(_zeile("gmx-test"), Attrappe({1: mail}))
+    r = _mails()[0]
+    assert r["referenzen"] == [f"k{i}@x" for i in range(280, 300)]
+    assert post_abholen._kennungen(lang) == []
+
+
+def test_kaputte_koepfe_kein_absturz():
+    _konto()
+    mail = _mail("<b@x>", in_reply_to="kein-klammerausdruck", references="auch kein <a b@x> id")
+    post_abholen.konto_abholen(_zeile("gmx-test"), Attrappe({1: mail}))
+    r = _mails()[0]
+    assert r["in_reply_to"] is None and r["referenzen"] == []
+    assert r["status"] == "neu" and r["kopf_nachgelesen"] is True
+    assert post_abholen._kennungen(None) == []
+
+
+def test_sensible_mail_behaelt_kennungen():
+    _konto()
+    mail = _mail("<c@x>", betreff="Ihr Sicherheitscode", text="Code 482913",
+                 in_reply_to="<a@x>", references="<r1@x> <a@x>")
+    post_abholen.konto_abholen(_zeile("gmx-test"), Attrappe({1: mail}))
+    r = _mails()[0]
+    assert r["text"] is None
+    assert r["in_reply_to"] == "a@x" and r["referenzen"] == ["r1@x", "a@x"]
 
 
 def test_sensibel_speichert_keinen_text(monkeypatch):

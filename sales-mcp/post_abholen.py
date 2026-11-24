@@ -12,7 +12,7 @@ UIDs oberhalb von `letzte_uid`, aelteste zuerst. So bleibt eine Runde kurz,
 auch wenn der Altbestand zehntausend Mails hat; er darf Tage brauchen.
 Aendert der Anbieter die UIDVALIDITY (GMX/Gmail nummerieren ein Postfach neu),
 beginnt das Konto von vorn. Die alten Zeilen bleiben, bekommen aber negative
-Platzhalter-UIDs, damit die neuen UIDs nicht an `unique (konto_id, imap_uid)`
+Platzhalter-UIDs, damit die neuen UIDs nicht an `unique (konto_id, richtung, imap_uid)`
 scheitern; findet sich dieselbe Mail wieder (Message-ID, Absender, Betreff),
 bekommt die alte Zeile ihre neue UID statt einer Dublette.
 
@@ -88,6 +88,7 @@ PRUEF_VERSUCHE_MAX = 3
 GATEWAY_SERIE_MAX = 3
 _gateway_serie: set[str] = set()   # Mail-IDs der laufenden Serie; lebt im Prozess
 KOPF_MAX = 1000               # Absender/Empfaenger/Betreff: Fremddaten, gedeckelt
+REFERENZEN_MAX = 20           # References: nur die letzten Kennungen (naechste Vorfahren)
 ANHANG_NAME_MAX = 200
 ANHAENGE_MAX = 50
 
@@ -176,10 +177,27 @@ def _sensibel_nach_muster(von: str, betreff: str) -> bool:
                for feld, muster in post_einordnung.SENSIBEL_MUSTER)
 
 
+_KENNUNG = re.compile(r"<([^<>]*)>")
+
+
+def _kennungen(kopf: str | None) -> list[str]:
+    """Message-IDs aus `<...>` in Kopfreihenfolge, ohne Klammern. Kennungen mit
+    Leerraum, leere oder ueber KOPF_MAX Zeichen werden verworfen."""
+    ergebnis = []
+    for treffer in _KENNUNG.findall(kopf or ""):
+        kennung = _rein(treffer, KOPF_MAX + 1)
+        if kennung and len(kennung) <= KOPF_MAX and not any(z.isspace() for z in kennung):
+            ergebnis.append(kennung)
+    return ergebnis
+
+
 def _mail_zerlegen(nachricht, kennung: str, uid: int, konto_adresse: str = "") -> dict:
     von = _rein(postfach._kopf(nachricht, "From"), KOPF_MAX)
     betreff = _rein(postfach._kopf(nachricht, "Subject"), KOPF_MAX)
     message_id = _rein(postfach._kopf(nachricht, "Message-ID").strip().strip("<>"), KOPF_MAX)
+    # Kennungen, kein Inhalt: bleiben auch bei sensiblen Mails (die Unterhaltung braucht sie).
+    antwort_auf = _kennungen(postfach._kopf(nachricht, "In-Reply-To"))
+    referenzen = _kennungen(postfach._kopf(nachricht, "References"))[-REFERENZEN_MAX:]
     text = _rein(_text_sicher(nachricht), postfach.TEXT_MAX)
     auszug = " ".join(text.split())[:postfach.AUSZUG_MAX]
     if _sensibel_nach_muster(von, betreff):
@@ -196,6 +214,7 @@ def _mail_zerlegen(nachricht, kennung: str, uid: int, konto_adresse: str = "") -
         # Bot die Mail oeffnet (postfach_mail_lesen) - wie frueher postfach.lesen.
         "kalenderteil": _kalender_sicher(nachricht),
         "von": von,
+        "in_reply_to": antwort_auf[0] if antwort_auf else None, "referenzen": referenzen,
         # Sensibel: weder Empfaenger noch Anhaenge speichern (Spec §5).
         "an": None if sensibel_treffer else _rein(postfach._kopf(nachricht, "To"), KOPF_MAX),
         "betreff": betreff, "datum": _datum(postfach._kopf(nachricht, "Date")),
@@ -231,6 +250,7 @@ def _unlesbar(kennung: str, uid: int, fehlertyp: str) -> dict:
     return {"message_id": _ersatz_id(kennung, uid), "message_id_ersatz": True,
             "kalenderteil": False, "von": None, "an": None,
             "betreff": None, "datum": None, "text": None, "auszug": None, "anhaenge": [],
+            "in_reply_to": None, "referenzen": [],
             "fehler": f"{ABHOLFEHLER} ({fehlertyp})"}
 
 
@@ -319,8 +339,10 @@ def _speichern(zeile: dict, uid: int, mail: dict | None) -> bool:
                 neu = conn.execute(
                     "insert into post_mails (konto_id, imap_uid, message_id, besitzer, "
                     "von, an, betreff, datum, text, auszug, anhaenge, status, fehler, "
-                    "bereich, fach, message_id_ersatz, kalenderteil, urspruengliche_adresse) values "
-                    "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                    "bereich, fach, message_id_ersatz, kalenderteil, urspruengliche_adresse, "
+                    "in_reply_to, referenzen, kopf_nachgelesen) values "
+                    "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                    "%s, %s, true) "
                     "on conflict (konto_id, richtung, imap_uid) do nothing returning id",
                     (zeile["id"], uid, mail["message_id"], zeile["besitzer"], mail["von"],
                      mail["an"], mail["betreff"], mail["datum"], mail["text"],
@@ -328,7 +350,8 @@ def _speichern(zeile: dict, uid: int, mail: dict | None) -> bool:
                      "fehler" if mail.get("fehler") else "neu", mail.get("fehler"),
                      "privat" if mail.get("fehler") else None,
                      post_struktur.UNKLAR if mail.get("fehler") else None,
-                     ersatz, bool(mail.get("kalenderteil")), mail.get("urspruengliche_adresse"))
+                     ersatz, bool(mail.get("kalenderteil")), mail.get("urspruengliche_adresse"),
+                     mail.get("in_reply_to"), mail.get("referenzen") or [])
                 ).fetchone() is not None
             elif str(vorhanden["konto_id"]) == str(zeile["id"]) and vorhanden["imap_uid"] < 0:
                 # Nach UIDVALIDITY-Wechsel wiedergefunden: neuer Fundort, keine
