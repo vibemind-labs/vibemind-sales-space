@@ -95,7 +95,11 @@ def test_bestand_ist_eingang(konto):
 def test_nachzieh_indizes_da():
     rows = server._q("select indexname, indexdef from pg_indexes where schemaname='sales_test' "
                      "and tablename='post_mails' and indexname in "
-                     "('post_mails_ohne_unterhaltung_idx','post_mails_gesendet_bezug_idx')")
+                     "('post_mails_ohne_unterhaltung_idx','post_mails_gesendet_idx',"
+                     "'post_mails_gesendet_bezug_idx')")
     assert {r["indexname"] for r in rows} == {"post_mails_ohne_unterhaltung_idx",
-                                              "post_mails_gesendet_bezug_idx"}
+                                              "post_mails_gesendet_idx"}
     assert all(" WHERE " in r["indexdef"] for r in rows)
+    # N2: das Praedikat passt zur Erbe-Abfrage (alle gesendeten, ohne Bezug-Bedingung).
+    gesendet = next(r["indexdef"] for r in rows if r["indexname"] == "post_mails_gesendet_idx")
+    assert gesendet.endswith("WHERE (richtung = 'gesendet'::text)")

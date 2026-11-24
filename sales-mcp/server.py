@@ -4266,7 +4266,11 @@ AGENT_HINWEIS = {
 
 def _agent_hinweis(zeile: dict) -> dict:
     """{"hinweis": <fester Text>} fuer eine nur als Kopf lesbare Mail, sonst {}.
-    Ein unbekannter Wert gilt als ungeprueft (fail closed)."""
+    Ein unbekannter Wert gilt als ungeprueft (fail closed). Eine gesendete Mail
+    (immer nur Kopf, AGENT_LESBAR_SQL) bekommt in Liste und Einzelansicht den
+    festen Gesendet-Hinweis: sie laesst sich nicht beantworten oder einstufen."""
+    if zeile.get("richtung") == "gesendet":
+        return {"hinweis": AGENT_HINWEIS["gesendet"]}
     art = zeile.get("agent_hinweis")
     if not art:
         return {}
@@ -4326,10 +4330,6 @@ def _sammelstelle_lesen(anzahl: int, wahl: str, suche: str) -> str:
         "dringlichkeit": _agent_dringlichkeit(z),
         "richtung": z.get("richtung"),
         **_agent_hinweis(z),
-        # Gesendete Treffer sind ohnehin nur Kopf (AGENT_LESBAR_SQL); der Hinweis sagt
-        # dazu, dass sie gesendet sind und sich nicht beantworten lassen.
-        **({"hinweis": AGENT_HINWEIS["gesendet"]}
-           if z.get("richtung") == "gesendet" else {}),
     } for z in zeilen]
     return _json({"anzahl": len(mails), "mails": mails})
 

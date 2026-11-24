@@ -14,10 +14,22 @@ from __future__ import annotations
 import logging
 import uuid
 
+import post_erledigt
 import server
 
 GRENZE = 500
 LOG = logging.getLogger("sales-post")
+
+
+def _eigen_sql(alias: str) -> str:
+    """SQL: der Absender der Zeile `alias` ist eine eigene Kontoadresse ihres Besitzers
+    (post_konten.adresse, gleicher Besitzer), bloße Adresse, ohne Gross/Klein. Die
+    Zerlegung des Absenders ist dieselbe wie im Abgleich (post_erledigt.ABSENDER_SQL).
+    Nur so ist ein Eingang ein Zwilling: die Message-ID einer gesendeten Mail kennt
+    jeder Empfaenger und koennte sie in einer fremden Mail wiederverwenden (N1)."""
+    absender = post_erledigt.ABSENDER_SQL.replace("m.von", f"{alias}.von")
+    return (f"exists (select 1 from post_konten k where k.besitzer = {alias}.besitzer "
+            f"and lower(btrim(k.adresse)) = {absender})")
 
 
 def zuordnen(conn, mail_id) -> str:
@@ -27,8 +39,10 @@ def zuordnen(conn, mail_id) -> str:
     Kennung der aeltesten Mail (datum, dann id); alle Mails der verlorenen Kennungen
     werden mit EINEM Update umgestellt."""
     mail = conn.execute(
-        "select id, besitzer, message_id, message_id_ersatz, in_reply_to, referenzen, "
-        "unterhaltung from post_mails where id = %s", (mail_id,)).fetchone()
+        "select m.id, m.besitzer, m.message_id, m.message_id_ersatz, m.in_reply_to, "
+        "m.referenzen, m.unterhaltung, m.richtung, "
+        f"(m.richtung = 'eingang' and {_eigen_sql('m')}) as eigener_eingang "
+        "from post_mails m where m.id = %s", (mail_id,)).fetchone()
     if mail is None:
         raise LookupError("Mail nicht gefunden")
     besitzer = mail["besitzer"]
@@ -40,14 +54,19 @@ def zuordnen(conn, mail_id) -> str:
     bezug = [k for k in [mail["in_reply_to"], *(mail["referenzen"] or [])] if k]
     # Nachbarn: die Mails, auf die sie sich bezieht; die Mails, die sich auf sie beziehen;
     # und ihr Zwilling mit derselben Message-ID (eine Mail an mich selbst liegt als
-    # Eingang UND als gesendet vor). Platzhalter verbinden in keiner Richtung.
+    # Eingang UND als gesendet vor). Zwilling ist nur das Paar gesendet <-> Eingang mit
+    # eigener Absenderadresse (N1). Platzhalter verbinden in keiner Richtung.
     nachbarn = conn.execute(
-        "select id, unterhaltung from post_mails where besitzer = %s and id <> %s and ("
-        "(not message_id_ersatz and message_id = any(%s)) "
-        "or (not %s and (in_reply_to = %s or referenzen @> array[%s]::text[] "
-        "               or (not message_id_ersatz and message_id = %s))))",
+        "select n.id, n.unterhaltung from post_mails n where n.besitzer = %s and n.id <> %s "
+        "and ((not n.message_id_ersatz and n.message_id = any(%s)) "
+        "or (not %s and (n.in_reply_to = %s or n.referenzen @> array[%s]::text[] "
+        "               or (not n.message_id_ersatz and n.message_id = %s and ("
+        f"                  (%s::text = 'gesendet' and n.richtung = 'eingang' "
+        f"                   and {_eigen_sql('n')})"
+        "                   or (%s::boolean and n.richtung = 'gesendet'))))))",
         (besitzer, mail["id"], bezug, mail["message_id_ersatz"], mail["message_id"],
-         mail["message_id"], mail["message_id"])).fetchall()
+         mail["message_id"], mail["message_id"], mail["richtung"],
+         mail["eigener_eingang"])).fetchall()
     kennungen = {n["unterhaltung"] for n in nachbarn if n["unterhaltung"] is not None}
     if mail["unterhaltung"] is not None:
         kennungen.add(mail["unterhaltung"])
@@ -72,8 +91,9 @@ def zuordnen(conn, mail_id) -> str:
 # References; beim selben Besitzer, nie ueber einen Platzhalter. Bei mehreren Zeilen mit
 # derselben Message-ID gewinnt der Eingang, dann die kleinste id.
 # Dazu der Zwilling (I2): dieselbe Mail als Eingang (Mail an mich selbst), gleicher
-# Besitzer, beide ohne Platzhalter. Sein Bereich geht vor (wenn gesetzt); sensibel wird
-# die gesendete Mail, wenn der Zwilling ODER die Bezugsmail es ist.
+# Besitzer, beide ohne Platzhalter, Absender eine eigene Kontoadresse (N1). Der Zwilling
+# macht nur strenger, nie lockerer: sensibel aus Zwilling ODER Bezugsmail; beim Bereich
+# hat die Bezugsmail Vorrang, und der Zwilling kann nur `privat` beitragen.
 # `%(gid)s`: NULL = alle gesendeten Mails (nachziehen), sonst nur diese eine (Speichern).
 _ERBE_SQL = """
 update post_mails g set
@@ -86,7 +106,9 @@ update post_mails g set
                                 then null else g.urspruengliche_adresse end,
   anhaenge = case when g.sensibel or x.sensibel then '{}'::text[] else g.anhaenge end
 from (
-  select g2.id as gid, coalesce(t.bereich, b.bereich) as bereich,
+  select g2.id as gid,
+         case when t.bereich = 'privat' or b.bereich = 'privat' then 'privat'
+              else b.bereich end as bereich,
          coalesce(t.sensibel, false) or coalesce(b.sensibel, false) as sensibel
   from post_mails g2
   left join lateral (
@@ -94,7 +116,8 @@ from (
     where t.besitzer = g2.besitzer and t.id <> g2.id and t.richtung = 'eingang'
       and not t.message_id_ersatz and not g2.message_id_ersatz
       and t.message_id = g2.message_id
-    order by t.sensibel desc, (t.bereich is null), t.id
+      and """ + _eigen_sql("t") + """
+    order by t.sensibel desc, (t.bereich = 'privat') desc nulls last, t.id
     limit 1) t on true
   left join lateral (
     select b.bereich, b.sensibel from post_mails b

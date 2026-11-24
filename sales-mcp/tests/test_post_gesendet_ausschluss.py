@@ -339,7 +339,8 @@ def test_agent_liste_ohne_gesendete_suche_nur_kopf(welt):
 
     einzeln = json.loads(server.postfach_mail_lesen(f"post:{welt['gesendet']}"))
     assert einzeln["text"] is None and einzeln["an"] is None and einzeln["anhaenge"] == []
-    assert einzeln["hinweis"] == server.AGENT_HINWEIS["nicht_geprueft"]
+    # Concern 4: die Einzelansicht nennt denselben festen Gesendet-Hinweis wie die Liste.
+    assert einzeln["hinweis"] == server.AGENT_HINWEIS["gesendet"]
 
 
 def test_beantworten_lehnt_gesendete_ab(welt, monkeypatch):

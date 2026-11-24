@@ -27,17 +27,17 @@ _uids = itertools.count(1)
 
 def _roh(kennung, message_id, tage=0, richtung="eingang", in_reply_to=None, referenzen=(),
          bereich=None, sensibel=False, ersatz=False, zuordnen=True, text="Inhalt",
-         besitzer="felix") -> str:
+         besitzer="felix", von="a@example.org") -> str:
     """Eine Mail einfuegen und - wie `_speichern` - in derselben Transaktion zuordnen."""
     konto = _zeile(kennung)
     with server.pool.connection() as conn, conn.transaction():
         mail_id = conn.execute(
             "insert into post_mails (konto_id, imap_uid, message_id, besitzer, von, an, betreff, "
             "datum, text, auszug, anhaenge, status, bereich, richtung, in_reply_to, referenzen, "
-            "sensibel, message_id_ersatz) values (%s, %s, %s, %s, 'a@example.org', "
+            "sensibel, message_id_ersatz) values (%s, %s, %s, %s, %s, "
             "'b@example.org', 'Betreff', %s, %s, %s, '{x.pdf}', %s, %s, %s, %s, %s, %s, %s) "
             "returning id",
-            (konto["id"], next(_uids), message_id, besitzer, BASIS + timedelta(days=tage),
+            (konto["id"], next(_uids), message_id, besitzer, von, BASIS + timedelta(days=tage),
              None if sensibel else text, None if sensibel else text,
              "gesendet" if richtung == "gesendet" else "neu", bereich, richtung, in_reply_to,
              list(referenzen), sensibel, ersatz)).fetchone()["id"]
@@ -300,11 +300,15 @@ def test_speichern_behaelt_mail_und_stand_wenn_zuordnen_scheitert(monkeypatch, c
 
 # --- Fix-Welle: Mail an mich selbst (I2), Sperrschluessel (M10a) -----------------------
 
+# Eigene Kontoadresse von "gmx-test" (siehe _konto); bewusst mit Namen und Grossschreibung.
+EIGEN = "Felix <GMX-Test@gmx.de>"
+
+
 def test_zwilling_teilt_unterhaltung_und_erbt_schutz():
     _konto()
     raus = _roh("gmx-test", "selbst@x", richtung="gesendet", bereich="business",
                 text="Notiz an mich")
-    eingang = _roh("gmx-test", "selbst@x", bereich="privat")
+    eingang = _roh("gmx-test", "selbst@x", bereich="privat", von=EIGEN)
     assert _unt(raus) is not None and _unt(raus) == _unt(eingang)
     with server.pool.connection() as conn:
         conn.execute("update post_mails set sensibel = true where id = %s", (eingang,))
@@ -316,13 +320,40 @@ def test_zwilling_teilt_unterhaltung_und_erbt_schutz():
     assert post_unterhaltung.nachziehen()["geerbt"] == 0
 
 
+@pytest.mark.parametrize("gesendet_zuerst", [True, False], ids=["gesendet-zuerst", "falsch-zuerst"])
+def test_gefaelschter_zwilling_aendert_nichts(gesendet_zuerst):
+    """N1: eine fremde Mail mit der Message-ID einer gesendeten Mail ist kein Zwilling -
+    kein Bereich, kein Leeren, keine gemeinsame Unterhaltung."""
+    _konto()
+
+    def falsch():
+        return _roh("gmx-test", "raus@x", bereich="business", sensibel=True,
+                    von="Mallory <mallory@example.org>")
+
+    def echt():
+        return _roh("gmx-test", "raus@x", tage=1, richtung="gesendet", bereich="privat",
+                    text="Privater Text")
+    if gesendet_zuerst:
+        raus, f = echt(), falsch()
+    else:
+        f, raus = falsch(), echt()
+    assert _unt(raus) != _unt(f)
+    assert post_unterhaltung.nachziehen()["geerbt"] == 0
+    z = _zeile_von(raus)
+    assert z["bereich"] == "privat" and z["sensibel"] is False and z["text"] == "Privater Text"
+    assert z["an"] == "b@example.org" and z["anhaenge"] == ["x.pdf"]
+    assert _unt(raus) != _unt(f)
+
+
 def test_zwilling_nie_ueber_besitzer_oder_platzhalter():
     _konto("felix", "felix-k")
     _konto("ivan", "ivan-k")
-    felix = _roh("felix-k", "gleich@x", besitzer="felix", bereich="privat", sensibel=True)
+    felix = _roh("felix-k", "gleich@x", besitzer="felix", bereich="privat", sensibel=True,
+                 von="felix-k@gmx.de")
     ivan = _roh("ivan-k", "gleich@x", richtung="gesendet", besitzer="ivan",
                 bereich="business", text="Ivans Text")
-    e1 = _roh("felix-k", "felix-k:1@sales-post", ersatz=True, bereich="privat", sensibel=True)
+    e1 = _roh("felix-k", "felix-k:1@sales-post", ersatz=True, bereich="privat", sensibel=True,
+              von="felix-k@gmx.de")
     e2 = _roh("felix-k", "felix-k:1@sales-post", richtung="gesendet", ersatz=True,
               bereich="business", text="Platzhaltertext")
     assert _unt(felix) != _unt(ivan) and _unt(e1) != _unt(e2)
@@ -332,10 +363,37 @@ def test_zwilling_nie_ueber_besitzer_oder_platzhalter():
         assert z["sensibel"] is False and z["text"] == text and z["bereich"] == "business"
 
 
-def test_zwilling_vorrang_vor_referenz_beim_bereich_sensibel_aus_beiden():
+def test_privater_zwilling_macht_privat():
+    _konto()
+    _roh("gmx-test", "selbst@x", bereich="privat", von=EIGEN)
+    raus = _roh("gmx-test", "selbst@x", tage=1, richtung="gesendet", bereich="business")
+    assert post_unterhaltung.nachziehen()["geerbt"] == 1
+    z = _zeile_von(raus)
+    assert z["bereich"] == "privat" and z["sensibel"] is False and z["text"] == "Inhalt"
+
+
+def test_business_zwilling_lockert_nie():
+    _konto()
+    _roh("gmx-test", "selbst@x", bereich="business", von=EIGEN)
+    raus = _roh("gmx-test", "selbst@x", tage=1, richtung="gesendet", bereich="privat")
+    assert post_unterhaltung.nachziehen()["geerbt"] == 0
+    assert _zeile_von(raus)["bereich"] == "privat"
+
+
+def test_bezugsmail_geht_beim_bereich_vor_zwilling_nur_strenger():
+    _konto()
+    _roh("gmx-test", "r1@x", bereich="privat")
+    _roh("gmx-test", "selbst@x", bereich="business", von=EIGEN)
+    raus = _roh("gmx-test", "selbst@x", tage=1, richtung="gesendet", in_reply_to="r1@x",
+                bereich="business")
+    post_unterhaltung.nachziehen()
+    assert _zeile_von(raus)["bereich"] == "privat"
+
+
+def test_privater_zwilling_schlaegt_business_bezug_sensibel_aus_beiden():
     _konto()
     _roh("gmx-test", "r1@x", bereich="business")
-    _roh("gmx-test", "selbst@x", bereich="privat")
+    _roh("gmx-test", "selbst@x", bereich="privat", von=EIGEN)
     raus = _roh("gmx-test", "selbst@x", tage=1, richtung="gesendet", in_reply_to="r1@x",
                 bereich="business")
     post_unterhaltung.nachziehen()
