@@ -19,6 +19,10 @@ Bewusst hingenommene Restrisiken (Security-Re-Reviews):
   die echte gesendete Zeile gespeichert ist. Fehlt sie noch (noch nicht abgeholt) oder
   fuer immer (vor dem Stichtag, im Gesendet-Ordner geloescht, vom Mailprogramm nie dort
   abgelegt), zaehlt die Kopie als gewoehnliche Bezugsmail einer spaeteren Antwort.
+
+`sensibel` wird nie wieder false - keine Abfrage hier setzt es zurueck, auch nicht, wenn
+sich ein Bezug spaeter als Faelschung zeigt. Ein einmal geleerter Inhalt bleibt leer (das
+Original liegt weiter im Postfach).
 """
 from __future__ import annotations
 
@@ -29,6 +33,9 @@ import post_erledigt
 import server
 
 GRENZE = 500
+# Erbe bis zum Fixpunkt: ein Durchlauf reicht Schutz eine Stufe weiter (Zwilling -> A,
+# A -> Antwort B, ...). Hoechstens so viele Durchlaeufe je Runde.
+ERBE_DURCHLAEUFE_MAX = 10
 LOG = logging.getLogger("sales-post")
 
 
@@ -183,7 +190,10 @@ def nachziehen(grenze: int = GRENZE, stopp=None) -> dict:
     gesendete Mails an ihre Bezugsmail an. Gibt {"zugeordnet": n, "geerbt": m, "fehler": k}
     zurueck. `stopp`: Aufrufbare ohne Argumente (z. B. Event.is_set); ist sie wahr, endet
     nur die Zuordnung, das Erbe laeuft immer. Eine Mail, deren Zuordnung scheitert, kostet
-    weder den Rest noch das Erbe; im Protokoll nur der Typ."""
+    weder den Rest noch das Erbe; im Protokoll nur der Typ.
+    Das Erbe laeuft wiederholt, bis ein Durchlauf nichts mehr aendert (hoechstens
+    ERBE_DURCHLAEUFE_MAX); so erreicht der Schutz einer Selbst-Kopie die gesendete Zeile
+    und deren Antworten in EINER Runde. `geerbt` zaehlt die Aenderungen aller Durchlaeufe."""
     with server.pool.connection() as conn:
         ids = [z["id"] for z in conn.execute(
             "select id from post_mails where unterhaltung is null "
@@ -199,6 +209,15 @@ def nachziehen(grenze: int = GRENZE, stopp=None) -> dict:
         except Exception as e:  # noqa: BLE001 - eine Mail haelt die anderen nicht auf
             fehler += 1
             LOG.warning("Unterhaltung nicht zugeordnet (%s)", type(e).__name__)
+    geerbt = 0
     with server.pool.connection() as conn, conn.transaction():
-        geerbt = erben(conn)
+        for _ in range(ERBE_DURCHLAEUFE_MAX):
+            geaendert = erben(conn)
+            geerbt += geaendert
+            if not geaendert:
+                break
+        else:
+            # Kette laenger als die Grenze (oder ein Kreis): der Rest folgt in der
+            # naechsten Runde. Im Protokoll nur die Zahl.
+            LOG.warning("Erbe nach %d Durchlaeufen nicht fertig", ERBE_DURCHLAEUFE_MAX)
     return {"zugeordnet": zugeordnet, "geerbt": geerbt, "fehler": fehler}

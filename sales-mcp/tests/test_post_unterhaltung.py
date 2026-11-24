@@ -438,8 +438,8 @@ def test_fremde_kopie_einer_gesendeten_id_ist_kein_bezug(falsch_vor_antwort):
 
 def test_echte_selbstkopie_schuetzt_die_antwort_ueber_die_gesendete_zeile():
     """F1, Gegenprobe: die echte Kopie (Mail an mich selbst, eigene Adresse) macht A
-    sensibel (Zwilling); B erbt es von A, der gesendeten Zeile - spaetestens im
-    naechsten Lauf, denn ein Lauf rechnet mit dem Stand vor seinem eigenen Update."""
+    sensibel (Zwilling); B erbt es von A, der gesendeten Zeile - in derselben Runde
+    (Erbe bis zum Fixpunkt)."""
     _konto()
     a = _roh("gmx-test", "a@x", richtung="gesendet", bereich="privat", text="A-Text")
     kopie = _roh("gmx-test", "a@x", tage=1, bereich="privat", sensibel=True, von=EIGEN)
@@ -447,9 +447,43 @@ def test_echte_selbstkopie_schuetzt_die_antwort_ueber_die_gesendete_zeile():
              bereich="privat", text="B-Text")
     post_unterhaltung.nachziehen()
     assert _zeile_von(a)["sensibel"] is True
-    post_unterhaltung.nachziehen()
     assert _zeile_von(b)["sensibel"] is True and _zeile_von(b)["text"] is None
     assert _unt(a) == _unt(kopie) == _unt(b)
+
+
+def test_erbe_bis_zum_fixpunkt_in_einer_runde():
+    """Runde 4: Selbst-Kopie sensibel -> gesendete A -> Antwort B -> Antwort C, alles in
+    EINEM nachziehen; der Inhalt aller drei ist danach leer."""
+    _konto()
+    a = _roh("gmx-test", "a@x", richtung="gesendet", bereich="business", text="A-Text")
+    _roh("gmx-test", "a@x", tage=1, bereich="privat", sensibel=True, von=EIGEN)
+    b = _roh("gmx-test", "b@x", tage=2, richtung="gesendet", in_reply_to="a@x",
+             bereich="business", text="B-Text")
+    c = _roh("gmx-test", "c@x", tage=3, richtung="gesendet", in_reply_to="b@x",
+             bereich="business", text="C-Text")
+    erg = post_unterhaltung.nachziehen()
+    for mid in (a, b, c):
+        z = _zeile_von(mid)
+        assert z["sensibel"] is True and z["bereich"] == "privat", mid
+        assert z["text"] is None and z["auszug"] is None and z["an"] is None
+        assert z["anhaenge"] == []
+    assert erg["geerbt"] >= 3
+    assert post_unterhaltung.nachziehen()["geerbt"] == 0
+
+
+def test_erbe_grenze_meldet_nur_die_zahl(monkeypatch, caplog):
+    aufrufe = []
+
+    def immer_eins(conn, mail_id=None):
+        aufrufe.append(mail_id)
+        return 1
+    monkeypatch.setattr(post_unterhaltung, "erben", immer_eins)
+    with caplog.at_level(logging.DEBUG):
+        erg = post_unterhaltung.nachziehen()
+    assert len(aufrufe) == post_unterhaltung.ERBE_DURCHLAEUFE_MAX == 10
+    assert erg["geerbt"] == 10 and aufrufe == [None] * 10
+    meldungen = [r.getMessage() for r in caplog.records if "Erbe" in r.getMessage()]
+    assert meldungen == ["Erbe nach 10 Durchlaeufen nicht fertig"]
 
 
 def test_gesendete_zeile_geht_als_bezug_vor_gefaelschter_eigener_kopie():
@@ -460,7 +494,6 @@ def test_gesendete_zeile_geht_als_bezug_vor_gefaelschter_eigener_kopie():
     _roh("gmx-test", "a@x", tage=1, bereich="business", von=EIGEN)
     b = _roh("gmx-test", "b@x", tage=2, richtung="gesendet", in_reply_to="a@x",
              referenzen=["a@x"], bereich="privat", text="B-Text")
-    post_unterhaltung.nachziehen()
     post_unterhaltung.nachziehen()
     z = _zeile_von(b)
     assert z["bereich"] == "privat" and z["sensibel"] is False and z["text"] == "B-Text"
@@ -496,6 +529,15 @@ def test_getarnter_absender_ist_kein_zwilling(von):
     ("g: attacker@evil.de;, <felix@own.de>", None),  # Gruppe vor dem <...>
     ("attacker@evil.de <felix@own.de>", None),
     ('"Baumann; Felix: x@y" <felix@own.de>', "felix@own.de"),   # nur in "..." erlaubt
+    # Re-Review 3: Escapes im Zitat, Kommentare, offene Zitate
+    (r'"a\"b"@evil.de, "c" <felix@own.de>', None),
+    ('(" ) attacker@evil.de ( ") <felix@own.de>', None),
+    ('"Felix Baumann <felix@own.de>', None),            # Zitat nie geschlossen
+    ('Felix "Baumann <felix@own.de>', None),
+    (r'"Felix \" <felix@own.de>', None),           # geschlossen nur per Escape
+    ('(Firma) <felix@own.de>', None),                    # Kommentar: fail closed
+    (r'"Baumann \"FB\" Felix" <felix@own.de>', "felix@own.de"),
+    ('<felix@own.de>', "felix@own.de"),
     ('"Felix <felix@own.de>" <attacker@evil.de>', None),
     ("<felix@own.de>, <attacker@evil.de>", None),
     ("<felix@own.de> attacker@evil.de", None),
