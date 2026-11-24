@@ -406,6 +406,8 @@ def mails_suchen(b: Betrachter, suche: str = "", bereich: str = "",
         teile.append("m.richtung = %s")
         params.append(richtung)
     if sucht:
+        # Die Suche deckt alle Reiter ab, geloeschte Mails aber nie.
+        teile.append("m.status <> 'geloescht'")
         teile.append("m.suchtext @@ websearch_to_tsquery('german', %s)")
         params.append(suche)
     params += [max(1, min(int(grenze), 200)), max(0, int(versatz))]
@@ -435,3 +437,24 @@ def mail_lesen(b: Betrachter, mail_id: str) -> "dict | None":
         f"where m.id = %s and {where}",
         [mid] + params)
     return zeilen[0] if zeilen else None
+
+
+def unterhaltung_lesen(b: Betrachter, mail_id: str, grenze: int = 50) -> list[dict]:
+    """Alle Mails der Unterhaltung von `mail_id`, die `b` sehen darf, nach Datum
+    aufsteigend (beide Richtungen). Ist die Mail selbst unsichtbar, unbekannt
+    oder ohne Unterhaltung, kommt `[]`. Sichtbarkeit und Agenten-Sperre kommen aus
+    `sichtbar_sql` und `_spalten`; es gibt hier keine zweite Regel."""
+    import server
+    try:
+        mid = str(uuid.UUID(str(mail_id)))
+    except ValueError:
+        return []
+    where, params = sichtbar_sql(b)
+    return server._q(
+        f"select {_spalten(agent=b.ist_agent)} from post_mails m where {where} "
+        "and m.status <> 'geloescht' and m.unterhaltung is not null "
+        "and m.unterhaltung = (select u.unterhaltung from post_mails u "
+        f"where u.id = %s and {where.replace('m.', 'u.')}) "
+        "order by m.datum asc nulls last, m.gesehen_am asc, m.id "
+        "limit %s",
+        params + [mid] + params + [max(1, min(int(grenze), 200))])

@@ -257,6 +257,8 @@ def routen(ui) -> list:
     def mail_zeile(m: dict, konten: dict, ansicht: str = "") -> str:
         marke = (' <span class="badge achtung">sensibel</span>'
                  if m["sensibel"] is not False else "")
+        if m.get("richtung") == "gesendet":
+            marke += ' <span class="badge">Gesendet</span>'
         if m.get("dringlichkeit") in ("sofort", "heute"):
             marke += (f' <span class="badge achtung">{e(m["dringlichkeit"])}</span>')
         fach = (f'{e(BEREICH_TITEL.get(m["bereich"], m["bereich"]))} · {e(m["fach"])}'
@@ -286,8 +288,10 @@ def routen(ui) -> list:
         seite = _ganzzahl(qp.get("seite"), 1, 1, SEITE_MAX)
         # Eine Zeile mehr holen als angezeigt: so weiß die Seite, ob es eine
         # nächste gibt, ohne zweite Zählabfrage.
+        # Die Suche gilt für alle Reiter und beide Richtungen: kein Reiterfilter.
         mails = ps.mails_suchen(b, suche=such, bereich=bereich, fach=fach,
-                                unterfach=unterfach, konto_id=konto, ziel=ansicht,
+                                unterfach=unterfach, konto_id=konto,
+                                ziel="" if such else ansicht,
                                 grenze=SEITE_GROESSE + 1,
                                 versatz=(seite - 1) * SEITE_GROESSE,
                                 nach_dringlichkeit=not such)
@@ -441,6 +445,30 @@ def routen(ui) -> list:
         return ('<section class="karte"><h2>Ablage ändern</h2>' + knoepfe + hinweis
                 + '</section>')
 
+    def unterhaltung_bereich(b, m) -> str:
+        """Die ganze Unterhaltung unter der Mail, beide Richtungen, nach Datum.
+        Zeigt nur Kopfdaten und - wo mail_lesen sie liefert - den Auszug."""
+        eintraege = ps.unterhaltung_lesen(b, m["id"])
+        if len(eintraege) < 2:
+            return ""
+        zeilen = []
+        for u in eintraege:
+            gesendet = u.get("richtung") == "gesendet"
+            aktuell = str(u["id"]) == str(m["id"])
+            marke = ' <span class="badge">Gesendet</span>' if gesendet else ""
+            if aktuell:
+                marke += ' <span class="meta">(diese Mail)</span>'
+            auszug = (f'<div class="meta">{e((u.get("auszug") or "")[:200])}</div>'
+                      if u.get("auszug") and u.get("sensibel") is False else "")
+            zeilen.append(
+                f'<a class="mailzeile" href="/post/mail/{e(u["id"])}">'
+                f'<b>{e(u["betreff"] or "(ohne Betreff)")}</b>{marke}'
+                f'<div class="meta">{e(u["von"])} · '
+                f'{e(ui._zeit(u["datum"]) if u["datum"] else "")}</div>'
+                f'{auszug}</a>')
+        return ('<section class="karte"><h2>Unterhaltung</h2>' + "".join(zeilen)
+                + '</section>')
+
     def erledigt_bereich(request, b, m) -> str:
         """Erledigt-Zustand und die Knoepfe dazu (Spec Z3/Z4). Nur der Besitzer
         (mit Rolle freigeben) sieht Knoepfe und den Zustand."""
@@ -570,7 +598,9 @@ def routen(ui) -> list:
         if not sensibel and m["an"]:
             kopf.insert(2, ("An", m["an"]))
         teile = [_STIL, '<p><a href="/post">← Alle Mails</a></p>',
-                 f'<div class="karte"><h2>{e(m["betreff"] or "(ohne Betreff)")}</h2>',
+                 f'<div class="karte"><h2>{e(m["betreff"] or "(ohne Betreff)")}'
+                 + (' <span class="badge">Gesendet</span>'
+                    if m.get("richtung") == "gesendet" else "") + '</h2>',
                  "".join(f'<div class="meta"><b>{e(k)}:</b> {e(v)}</div>' for k, v in kopf)]
         if sensibel:
             # Spec §5: von sensiblen Mails bleiben nur Kopfdaten; Text und
@@ -596,8 +626,12 @@ def routen(ui) -> list:
                 + (' · <a href="/freigaben?tab=nachrichten&amp;art=anweisung">'
                    'In den Freigaben ansehen</a>' if not frei else "")
                 + '</p>')
-        teile.append(erledigt_bereich(request, b, m))
-        if darf_korrigieren(request, b, m):
+        gesendet = m.get("richtung") == "gesendet"
+        if not gesendet:
+            teile.append(erledigt_bereich(request, b, m))
+        teile.append(unterhaltung_bereich(b, m))
+        # Gesendete Mails haben kein Fach, Ziel oder Erledigt: keine Knöpfe.
+        if not gesendet and darf_korrigieren(request, b, m):
             teile.append(ziel_formulare(m))
             teile.append(vorschlag_formulare(m, regel_angeboten(b, m)))
             teile.append(korrektur_formular(m, regel_angeboten(b, m)))

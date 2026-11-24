@@ -295,3 +295,42 @@ def test_speichern_behaelt_mail_und_stand_wenn_zuordnen_scheitert(monkeypatch, c
     monkeypatch.undo()
     assert post_unterhaltung.nachziehen()["zugeordnet"] == 1
     assert _mails()[0]["unterhaltung"] is not None
+
+
+# --- Task 7: Unterhaltung lesen ---------------------------------------------
+
+def _felix():
+    import post_struktur
+    return post_struktur.Betrachter(name="felix", leitung=False, abteilungen=())
+
+
+def test_unterhaltung_lesen_beide_richtungen():
+    import post_struktur
+    _konto()
+    m1 = _roh("gmx-test", "u1@x", tage=0)
+    m2 = _roh("gmx-test", "u2@x", tage=1, richtung="gesendet", in_reply_to="u1@x")
+    m3 = _roh("gmx-test", "u3@x", tage=2, in_reply_to="u2@x")
+    fremd = _roh("gmx-test", "u9@x", tage=1)
+    for start in (m1, m2, m3):
+        eintraege = post_struktur.unterhaltung_lesen(_felix(), start)
+        assert [str(x["id"]) for x in eintraege] == [m1, m2, m3]
+        assert [x["richtung"] for x in eintraege] == ["eingang", "gesendet", "eingang"]
+        assert {"id", "richtung", "von", "an", "betreff", "datum", "auszug"} <= set(eintraege[0])
+    assert [str(x["id"]) for x in post_struktur.unterhaltung_lesen(_felix(), fremd)] == [fremd]
+
+
+def test_unterhaltung_respektiert_sichtbarkeit(monkeypatch):
+    import post_struktur
+    _konto()
+    m1 = _roh("gmx-test", "v1@x", bereich="business")
+    m2 = _roh("gmx-test", "v2@x", tage=1, richtung="gesendet", in_reply_to="v1@x",
+              bereich="business")
+    anna = post_struktur.Betrachter(name="anna", leitung=True, abteilungen=("Vertrieb",))
+    assert post_struktur.unterhaltung_lesen(anna, m1) == []
+    assert post_struktur.unterhaltung_lesen(_felix(), "kein-uuid") == []
+    monkeypatch.setenv("POST_BESITZER", "felix")
+    eintraege = post_struktur.unterhaltung_lesen(post_struktur.BETREIBER_AGENT, m1)
+    gesendet = [x for x in eintraege if str(x["id"]) == m2]
+    assert gesendet and gesendet[0]["auszug"] is None and gesendet[0]["an"] is None
+    monkeypatch.delenv("POST_BESITZER")
+    assert post_struktur.unterhaltung_lesen(post_struktur.BETREIBER_AGENT, m1) == []

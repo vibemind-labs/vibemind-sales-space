@@ -1095,3 +1095,56 @@ def test_agent_werkzeuge_lesen_keinen_mailtext_aus_activities(kontakt_mit_mail):
     assert MAILTEXT not in alle and "ALTMAIL-777" not in alle and WATEXT in alle
     texte = " ".join(n["text"] for n in server._letzte_nachrichten(kontakt_mit_mail, 10))
     assert MAILTEXT not in texte and "ALTMAIL-777" not in texte and WATEXT in texte
+
+
+# ---------------------------------------------------------------------------
+# Post-Assistent Stufe 1, Task 7: Unterhaltung, Gesendet-Etikett, Suche
+# ---------------------------------------------------------------------------
+
+def _gesendet(besitzer="t8_anna", betreff="Antwort", text="Danke",
+              an="kunde@firma.de"):
+    mid = _mail(besitzer=besitzer, betreff=betreff, text=text, an=an)
+    server._q("update post_mails set richtung = 'gesendet', status = 'gesendet', "
+              "datum = now() where id = %s", (mid,))
+    return mid
+
+
+def _verbinden(*ids):
+    import uuid
+    u = str(uuid.uuid4())
+    server._q("update post_mails set unterhaltung = %s where id = any(%s::uuid[])",
+              (u, list(ids)))
+
+
+def test_mailansicht_zeigt_unterhaltung_und_etikett():
+    eingang = _mail(betreff="Anfrage Zeta")
+    antwort = _gesendet(betreff="Re: Anfrage Zeta Antwortbetreff")
+    _verbinden(eingang, antwort)
+    r = _get("t8_anna", f"/post/mail/{eingang}")
+    assert r.status_code == 200
+    assert "Antwortbetreff" in r.text and "Gesendet" in r.text
+    assert f"/post/mail/{antwort}" in r.text
+
+
+def test_gesendete_ansicht_ohne_knoepfe():
+    eingang = _mail(betreff="Anfrage")
+    antwort = _gesendet()
+    _verbinden(eingang, antwort)
+    r = _get("t8_anna", f"/post/mail/{antwort}")
+    assert r.status_code == 200 and "Gesendet" in r.text
+    for aktion in ("/korrigieren", "/ziel", "/erledigt", "/kontakt"):
+        assert f"/post/mail/{antwort}{aktion}" not in r.text
+    # Gegenprobe: die eingehende Mail hat ihre Knöpfe weiter.
+    assert f"/post/mail/{eingang}/korrigieren" in _get("t8_anna", f"/post/mail/{eingang}").text
+
+
+def test_suche_findet_gesendete_in_jedem_reiter_und_keine_geloeschten():
+    _gesendet(betreff="Quokkaplan gesendet", text="Quokkaplan")
+    _mail(betreff="Quokkaplan geloescht", text="Quokkaplan", status="geloescht")
+    for pfad in ("/post?q=Quokkaplan", "/post?ansicht=to_review&q=Quokkaplan"):
+        r = _get("t8_anna", pfad)
+        assert r.status_code == 200
+        assert "Quokkaplan gesendet" in r.text and "Gesendet" in r.text
+        assert "Quokkaplan geloescht" not in r.text
+    # Ohne Suchwort keine gesendeten Mails in der Liste.
+    assert "Quokkaplan gesendet" not in _get("t8_anna", "/post").text
