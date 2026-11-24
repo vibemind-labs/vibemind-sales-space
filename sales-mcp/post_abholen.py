@@ -769,12 +769,15 @@ def einordnen_offene(grenze: int) -> int:
                "m.imap_uid, m.urspruengliche_adresse, k.kennung, k.standard_bereich "
                "from post_mails m "
                "left join post_konten k on k.id = m.konto_id ")
+    # Gesendete Mails sieht das Modell nie (Spec 1.1): in BEIDEN Teilen ausdruecklich
+    # nur eingehende, nicht nur ueber den Status.
     offene = server._q(
-        f"select 'neu' as art, {spalten} where m.status = 'neu' "
+        f"select 'neu' as art, {spalten} where m.richtung = 'eingang' and m.status = 'neu' "
         "union all "
         # Nachpruefen: nie sensible Mails (ihr Text ist geloescht) und nie Werbung; nach
         # PRUEF_VERSUCHE_MAX gescheiterten Versuchen bleibt die Mail ungeprueft liegen.
-        f"select 'nachpruefen' as art, {spalten} where m.status = 'eingeordnet' "
+        f"select 'nachpruefen' as art, {spalten} where m.richtung = 'eingang' "
+        "and m.status = 'eingeordnet' "
         "and m.geprueft_am is null and m.sensibel is false "
         "and m.fach is distinct from %s and m.pruef_versuche < %s "
         # Neueste Mail zuerst (damit auch das neueste Jahr), ohne Datum zuletzt.
@@ -970,6 +973,8 @@ def modellaufrufe_heute() -> int:
     # Jeder Modellaufruf zaehlt genau einmal, an dem Tag, an dem er anfiel:
     # - modellaufrufe: Kosten der endgueltigen Einordnung (feste Regeln und menschliche
     #   Korrekturen: 0) am Tag eingeordnet_am,
+    # Gesendete Mails kosten nie einen Aufruf und zaehlen nicht zur Tagesgrenze (Spec 1.4):
+    # jeder Teil filtert ausdruecklich auf eingehende Mails.
     # - fehl_aufrufe: Kosten der Fehlversuche (Pruefer ausgefallen) am Tag fehl_am - so
     #   entgeht auch eine noch `neue` Mail mit toten Versuchen der Grenze nicht und
     #   zaehlt nicht an Folgetagen erneut,
@@ -978,13 +983,13 @@ def modellaufrufe_heute() -> int:
     #   lief die Pruefung im Einordnungs-Aufruf mit, dort bleibt pruef_aufrufe 0.
     zeile = server._q(
         "select (select coalesce(sum(modellaufrufe), 0) from post_mails "
-        "         where eingeordnet_am::date = current_date) "
+        "         where richtung = 'eingang' and eingeordnet_am::date = current_date) "
         "     + (select coalesce(sum(fehl_aufrufe), 0) from post_mails "
-        "         where fehl_am::date = current_date) "
+        "         where richtung = 'eingang' and fehl_am::date = current_date) "
         "     + (select coalesce(sum(vorschau_aufrufe), 0) from post_mails "
-        "         where vorschau_am::date = current_date) "
+        "         where richtung = 'eingang' and vorschau_am::date = current_date) "
         "     + (select coalesce(sum(pruef_aufrufe), 0) from post_mails "
-        "         where geprueft_am::date = current_date) as n")[0]
+        "         where richtung = 'eingang' and geprueft_am::date = current_date) as n")[0]
     return int(zeile["n"])
 
 

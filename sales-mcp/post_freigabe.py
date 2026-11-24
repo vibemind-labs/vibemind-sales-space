@@ -18,9 +18,11 @@ BEISPIELE = 3
 BETREFF_MAX = 80
 _OHNE_BETREFF = "(kein Betreff)"
 
-# Mails des Besitzers im Jahr, die heute auf `loeschen` stehen (nur eigene Konten).
+# Mails des Besitzers im Jahr, die heute auf `loeschen` stehen (nur eigene Konten,
+# nur eingehende: gesendete Mails werden nie geloescht).
 _LOESCHBAR = ("from post_mails m join post_konten k on k.id = m.konto_id "
-              "where k.besitzer = %s and m.status = 'eingeordnet' and m.ziel = 'loeschen' "
+              "where k.besitzer = %s and m.richtung = 'eingang' "
+              "and m.status = 'eingeordnet' and m.ziel = 'loeschen' "
               "and extract(year from m.datum) = %s")
 
 
@@ -125,7 +127,8 @@ def jahre(besitzer: str) -> list[dict]:
         "  select extract(year from m.datum)::int as jahr, count(*)::int as eingeordnet, "
         "  (count(*) filter (where m.ziel = 'loeschen'))::int as loeschbar "
         "  from post_mails m join post_konten k on k.id = m.konto_id "
-        "  where k.besitzer = %s and m.status = 'eingeordnet' and m.datum is not null "
+        "  where k.besitzer = %s and m.richtung = 'eingang' and m.status = 'eingeordnet' "
+        "  and m.datum is not null "
         "  group by 1) y "
         "left join post_loeschfreigaben f on f.besitzer = %s and f.jahr = y.jahr "
         "order by y.jahr desc", (besitzer, besitzer))
@@ -146,6 +149,7 @@ def offene_mails(besitzer: str) -> int:
     import post_neu_einordnen   # erst hier: zieht die Abholung nach
     zeile = _db()._q(
         "select count(*) as n from post_mails m join post_konten k on k.id = m.konto_id "
-        f"where k.besitzer = %s and (m.status = 'neu' or ({post_neu_einordnen._altbestand('m.')}))",
+        "where k.besitzer = %s and m.richtung = 'eingang' "
+        f"and (m.status = 'neu' or ({post_neu_einordnen._altbestand('m.')}))",
         (besitzer,))[0]
     return int(zeile["n"])

@@ -52,9 +52,11 @@ def _altbestand(t: str = "") -> str:
     `fehler` nur, wenn das Einsortieren scheiterte: eine Mail, die schon beim Abholen
     kaputt war (post_abholen.ABHOLFEHLER), bleibt stehen - anwenden setzte sie sonst auf
     eingeordnet und loeschte die Fehlermeldung. starts_with statt LIKE: ein `%` im Text
-    vertruege sich nicht mit den Platzhaltern der Abfragen, die diesen Teil einbetten."""
+    vertruege sich nicht mit den Platzhaltern der Abfragen, die diesen Teil einbetten.
+    Nur eingehende Mails: gesendete sieht das Modell nie (Spec 1.1)."""
     abholfehler = post_abholen.ABHOLFEHLER.replace("'", "''")
-    return (f"({t}status = 'eingeordnet' or ({t}status = 'fehler' "
+    return (f"{t}richtung = 'eingang' "
+            f"and ({t}status = 'eingeordnet' or ({t}status = 'fehler' "
             f"and not starts_with(coalesce({t}fehler, ''), '{abholfehler}'))) "
             f"and {t}einordnung_quelle is distinct from 'mensch' "
             f"and {t}einordnung_version < 3")
@@ -252,7 +254,8 @@ def _unklar_laufend() -> dict:
         "select coalesce(k.kennung, '(ohne Konto)') as kennung, count(*) as n, "
         "count(*) filter (where m.fach = %s) as unklar from post_mails m "
         "left join post_konten k on k.id = m.konto_id "
-        "where m.status = 'eingeordnet' and m.einordnung_version = 3 "
+        "where m.richtung = 'eingang' and m.status = 'eingeordnet' "
+        "and m.einordnung_version = 3 "
         "and m.einordnung_quelle is distinct from 'mensch' group by 1",
         (post_struktur.UNKLAR,))
     return {z["kennung"]: {"anteil": int(z["unklar"]) / int(z["n"]), "n": int(z["n"])}

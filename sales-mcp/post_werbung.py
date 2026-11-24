@@ -49,7 +49,8 @@ def bleibt_immer_absender(besitzer: str, von: str) -> bool:
     if m is None or not besitzer:
         return False
     return bool(_db()._q(
-        "select 1 from post_mails where besitzer = %s and fach = any(%s) and von ~* %s limit 1",
+        "select 1 from post_mails where besitzer = %s and richtung = 'eingang' "
+        "and fach = any(%s) and von ~* %s limit 1",
         (besitzer, sorted(post_struktur.BLEIBT_IMMER), m[1])))
 
 
@@ -71,7 +72,8 @@ def regel_vorschlagen(besitzer: str, von: str) -> bool:
         # Absender bisher landete (Firmen- oder Privatpostfach).
         "(array_agg(bereich order by eingeordnet_am desc nulls last) "
         "filter (where werbung_sicher))[1] as bereich "
-        "from post_mails where besitzer = %s and von ~* %s", (sperr_faecher, besitzer, muster))[0]
+        "from post_mails where besitzer = %s and richtung = 'eingang' and von ~* %s",
+        (sperr_faecher, besitzer, muster))[0]
     if zeile["sichere"] < MIN_SICHERE or zeile["sperre"] > 0:
         return False
     with server.pool.connection() as conn:

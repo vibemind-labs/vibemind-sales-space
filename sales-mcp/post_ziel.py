@@ -172,8 +172,10 @@ def _bleibt(server, besitzer: str | None = None,
     """(Besitzer, Adresse) der Absender mit mindestens einer Mail in einem Fach aus
     BLEIBT_IMMER. Die Adresse kommt wie ueberall aus post_struktur.absender_adresse (klein,
     aus „Name <addr>“), nicht aus SQL. Mit `besitzer`/`adresse` nur die passenden Zeilen."""
+    # Nur eingehende Post: der Absender einer gesendeten Mail ist der Besitzer selbst.
     sql = ("select distinct besitzer, von from post_mails "
-           "where fach = any(%s) and besitzer is not null and von is not null")
+           "where richtung = 'eingang' and fach = any(%s) "
+           "and besitzer is not null and von is not null")
     werte: list = [sorted(post_struktur.BLEIBT_IMMER)]
     if besitzer is not None:
         sql += " and besitzer = %s"
@@ -205,7 +207,8 @@ def ziel_frisch(mail_id) -> str | None:
     gespeicherte `ziel` kann seit dem letzten ziele_aktualisieren veraltet sein."""
     server = _db()
     zeilen = server._q(f"select {_SPALTEN} from post_mails "
-                       "where id = %s and status = 'eingeordnet'", (mail_id,))
+                       "where id = %s and richtung = 'eingang' and status = 'eingeordnet'",
+                       (mail_id,))
     if not zeilen:
         return None
     z = zeilen[0]
@@ -235,9 +238,11 @@ def ziele_aktualisieren() -> int:
         schutz = _schutz(server)
         bleibt = _bleibt(server)
 
+        # Ziel hat nur eingehende Post: eine gesendete Mail wird nie verschoben oder
+        # geloescht (Spec 1.4), ausdruecklich und nicht nur ueber den Status.
         zeilen = server._q(
             f"select {_SPALTEN} from post_mails "
-            "where status = 'eingeordnet' and not ziel_manuell")
+            "where richtung = 'eingang' and status = 'eingeordnet' and not ziel_manuell")
 
         neu: dict[str, list] = {}
         for z in zeilen:
@@ -250,7 +255,7 @@ def ziele_aktualisieren() -> int:
                 # Die Bedingungen wiederholt: eine Handentscheidung oder ein Loeschen, das
                 # zwischen Lesen und Schreiben passiert, wird nicht ueberschrieben.
                 geaendert += conn.execute(
-                    "update post_mails set ziel = %s where id = any(%s) "
+                    "update post_mails set ziel = %s where id = any(%s) and richtung = 'eingang' "
                     "and status = 'eingeordnet' and not ziel_manuell and ziel is distinct from %s",
                     (ziel, ids[i:i + _BLOCK], ziel)).rowcount
     LOG.info("Ziele: %d von %d Mails geaendert", geaendert, len(zeilen))

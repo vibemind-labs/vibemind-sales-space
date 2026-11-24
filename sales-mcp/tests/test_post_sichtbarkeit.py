@@ -337,8 +337,11 @@ def _nur_kopf(z, hinweis):
 def test_agent_lesbar_sql_wert():
     # Bewusst angepasst (Final-Fix F3, R9): eine gesperrte Mail bleibt Kopf,
     # auch wenn die Pruefung sie (spaeter) als unbedenklich einstuft.
+    # Bewusst angepasst (Stufe 1, Ruling S1): gesendete Mails sind fuer den
+    # Agenten ausdruecklich nie lesbar, nicht nur ueber geprueft_am.
     assert ps.AGENT_LESBAR_SQL == (
-        "(m.geprueft_am is not null "
+        "(m.richtung = 'eingang' "
+        "and m.geprueft_am is not null "
         "and m.anweisung_entscheid is distinct from 'gesperrt' "
         "and (m.enthaelt_anweisung is false "
         "or m.anweisung_entscheid = 'freigegeben'))")

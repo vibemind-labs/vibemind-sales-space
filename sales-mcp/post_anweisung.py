@@ -25,7 +25,9 @@ _GRENZE = 200
 
 # Eine Mail wartet auf den Besitzer, solange sie eingeordnet, markiert, nicht
 # entschieden und nicht sensibel ist (sensible liest der Agent ohnehin nie).
-_WARTET_SQL = ("m.status = 'eingeordnet' and m.enthaelt_anweisung is true "
+# Nur eingehende Mails: gesendete werden nie geprueft und nie freigegeben (Ruling S1).
+_WARTET_SQL = ("m.richtung = 'eingang' and m.status = 'eingeordnet' "
+               "and m.enthaelt_anweisung is true "
                "and m.anweisung_entscheid is null and m.sensibel is false")
 
 
@@ -69,7 +71,8 @@ def entscheiden(mail_id: str, entscheid: str, von: str) -> bool:
         return False
     z = server._q(
         "update post_mails set anweisung_entscheid = %s, anweisung_entschieden_am = now() "
-        "where id = %s and besitzer = %s and enthaelt_anweisung is true "
+        "where id = %s and besitzer = %s and richtung = 'eingang' "
+        "and enthaelt_anweisung is true "
         "and anweisung_entscheid is null returning id", (entscheid, mid, besitzer))
     if not z:
         return False

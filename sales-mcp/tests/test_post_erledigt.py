@@ -464,7 +464,8 @@ def test_stichtag_sql_geteilt_mit_offen_sql(db, monkeypatch):
     assert post_erledigt.stichtag_sql() in post_erledigt.offen_sql()
     monkeypatch.setattr(post_ziel, "ALTBESTAND_AB", date.max)
     assert post_erledigt.stichtag_sql() == "false"
-    assert post_erledigt.offen_sql() == "(m.ziel = 'posteingang' and m.status = 'eingeordnet' " \
+    assert post_erledigt.offen_sql() == "(m.richtung = 'eingang' " \
+        "and m.ziel = 'posteingang' and m.status = 'eingeordnet' " \
         "and m.erledigt_am is null and m.abgeglichen_am is not null " \
         "and m.geloescht_am is null and false)"
 

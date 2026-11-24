@@ -9,6 +9,11 @@ import re
 
 BEREICHE = ("privat", "business")
 
+# Richtung einer Mail (Stufe 1): eingegangen oder vom Besitzer gesendet. Faecher,
+# Listen, Warteschlangen und Aufraeumen meinen nur `eingang`; Suche und
+# Unterhaltung beide. Der Status allein ist nicht der Vertrag.
+RICHTUNGEN = ("eingang", "gesendet")
+
 # Dringlichkeit einer Mail, von dringend nach unwichtig (Spec 3a).
 DRINGLICHKEITEN = ("sofort", "heute", "kann_warten", "nichts")
 
@@ -245,8 +250,11 @@ def sichtbar_sql(b: Betrachter) -> tuple[str, list]:
 # keine Anweisung an eine KI enthaelt - oder der Besitzer sie freigegeben hat.
 # Hat der Besitzer sie gesperrt, bleibt sie gesperrt, auch wenn eine spaetere
 # Pruefung sie als unbedenklich einstuft (R9).
+# Gesendete Mails liest der Agent nie (Ruling S1): ausdruecklich hier, nicht nur,
+# weil sie kein geprueft_am bekommen.
 AGENT_LESBAR_SQL = (
-    "(m.geprueft_am is not null "
+    "(m.richtung = 'eingang' "
+    "and m.geprueft_am is not null "
     "and m.anweisung_entscheid is distinct from 'gesperrt' "
     "and (m.enthaelt_anweisung is false "
     "or m.anweisung_entscheid = 'freigegeben'))")
@@ -302,6 +310,7 @@ def _spalten(mit_vorschlaegen: bool = False, agent: bool = False) -> str:
         hinweis = ""
         dringlichkeit = "m.dringlichkeit"
     return ("m.id, m.konto_id, m.besitzer, m.von, m.betreff, m.datum, "
+            "m.richtung, "
             "m.bereich, m.fach, m.unterfach, m.sensibel, m.status, m.gesehen_am, "
             f"m.ziel, m.ordner, m.ordner_am, {dringlichkeit} as dringlichkeit, "
             "m.enthaelt_anweisung, m.anweisung_entscheid, "
@@ -332,25 +341,36 @@ def ziel_sql(ziel: str) -> str:
     """WHERE-Fragment (ohne Parameter) fuer eine Reiter-Ansicht; leer ohne Filter.
 
     Geloeschte Mails stehen in keinem Mail-Reiter. `aufmerksamkeit` nimmt zusaetzlich
-    Mails ohne Ziel mit: was noch nicht entschieden ist, muss sichtbar bleiben."""
+    Mails ohne Ziel mit: was noch nicht entschieden ist, muss sichtbar bleiben.
+    Reiter zeigen nur eingehende Mails (gesendete stehen in Unterhaltung und Suche)."""
     if ziel == "aufmerksamkeit":
-        return "(m.status <> 'geloescht' and (m.ziel = 'posteingang' or m.ziel is null))"
+        return ("(m.richtung = 'eingang' and m.status <> 'geloescht' "
+                "and (m.ziel = 'posteingang' or m.ziel is null))")
     if ziel in ("zur_info", "to_review"):
-        return f"(m.status <> 'geloescht' and m.ziel = '{ziel}')"
+        return (f"(m.richtung = 'eingang' and m.status <> 'geloescht' "
+                f"and m.ziel = '{ziel}')")
     return ""
 
 
 def mails_suchen(b: Betrachter, suche: str = "", bereich: str = "",
                  fach: str = "", konto_id: str = "", grenze: int = 50,
                  versatz: int = 0, unterfach: str = "", ziel: str = "",
-                 nach_dringlichkeit: bool = False) -> list[dict]:
+                 nach_dringlichkeit: bool = False, richtung: str = "") -> list[dict]:
     """Mails, die `b` sehen darf, neueste zuerst. `nach_dringlichkeit`
     sortiert erst nach Dringlichkeit: sofort, heute, dann kann_warten und
     ungepruefte gemeinsam (der Altbestand rutscht nicht nach unten), zuletzt
-    nichts; innerhalb eines Rangs nach Datum."""
+    nichts; innerhalb eines Rangs nach Datum.
+
+    `richtung` (eingang/gesendet) filtert ausdruecklich. Leer gilt: ohne
+    `suche` nur eingehende Mails (Liste), mit `suche` beide Richtungen."""
     import server
     if ziel and ziel not in ZIEL_ANSICHTEN:
         return []
+    if richtung and richtung not in RICHTUNGEN:
+        return []
+    sucht = bool(suche and suche.strip())
+    if not richtung and not sucht:
+        richtung = "eingang"
     if bereich and bereich not in BEREICHE:
         return []
     if fach:
@@ -382,7 +402,10 @@ def mails_suchen(b: Betrachter, suche: str = "", bereich: str = "",
     if konto_id:
         teile.append("m.konto_id = %s")
         params.append(konto_id)
-    if suche and suche.strip():
+    if richtung:
+        teile.append("m.richtung = %s")
+        params.append(richtung)
+    if sucht:
         teile.append("m.suchtext @@ websearch_to_tsquery('german', %s)")
         params.append(suche)
     params += [max(1, min(int(grenze), 200)), max(0, int(versatz))]

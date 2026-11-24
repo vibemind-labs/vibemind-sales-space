@@ -376,12 +376,13 @@ def _konten() -> list:
 def _mails(konto_id: str, besitzer: str, grenze: datetime) -> list:
     """Mails eines Kontos im Fenster - ohne Text (der kommt je Zeile ueber
     `_text`). `besitzer` zusaetzlich zur konto_id: eine Mail eines anderen
-    Besitzers verlaesst sales-claw auch bei falsch verknuepfter Zeile nie."""
+    Besitzers verlaesst sales-claw auch bei falsch verknuepfter Zeile nie.
+    Nur eingehende Mails: eine gesendete ist keine Bewerbung."""
     import server
     return server._q(
         "select id, von, an, betreff, datum, gesehen_am, message_id, "
         "message_id_ersatz from post_mails "
-        "where konto_id = %s and besitzer = %s "
+        "where konto_id = %s and besitzer = %s and richtung = 'eingang' "
         "and (datum >= %s or (datum is null and gesehen_am >= %s)) "
         "order by coalesce(datum, gesehen_am), id",
         (konto_id, besitzer, grenze, grenze))

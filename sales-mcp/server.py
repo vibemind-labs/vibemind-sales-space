@@ -4241,11 +4241,12 @@ def betreiber_mail_entwurf(empfaenger: str, betreff: str, text: str,
 
 
 def _sammelstelle_leer() -> bool:
-    """True, wenn post_mails in diesem Laden noch gar keine Zeile hat (der
-    Abhol-Dienst lief noch nie). Nur dann darf der Bot den alten IMAP-Weg
-    nehmen - sobald die Sammelstelle Mails kennt, gilt nur noch sie."""
+    """True, wenn post_mails in diesem Laden noch keine eingehende Zeile hat
+    (der Abhol-Dienst lief noch nie). Nur dann darf der Bot den alten IMAP-Weg
+    nehmen - sobald die Sammelstelle Mails kennt, gilt nur noch sie.
+    Gesendete Zeilen zaehlen nicht: die Liste zeigt sie ohnehin nicht."""
     try:
-        return not _q("select 1 from post_mails limit 1")
+        return not _q("select 1 from post_mails where richtung = 'eingang' limit 1")
     except psycopg.errors.UndefinedTable:
         return True      # Laden noch nicht migriert -> wie leer
 
@@ -4326,6 +4327,9 @@ def _sammelstelle_lesen(anzahl: int, wahl: str, suche: str) -> str:
 
 _STUFE2_HINWEIS = ("Antworten/Aufraeumen fuer dieses Postfach kommt mit "
                    "Stufe 2 - bitte betreiber_mail_entwurf nutzen.")
+# Fester Fehler fuer eine gesendete `post:`-Mail: kein IMAP-Zugriff, kein Entwurf.
+GESENDET_FEHLER = ("Diese Mail wurde gesendet und lässt sich nicht beantworten "
+                   "oder einstufen.")
 
 
 def _mid_norm(mid) -> str:
@@ -4351,10 +4355,14 @@ def _post_uid_aufloesen(uid) -> tuple:
                                         roh[5:].strip())
         if mail is None or not mail.get("konto_id"):
             return None, nicht_da, None, False
+        if mail.get("richtung") != "eingang":
+            # Stufe 1: eine gesendete Mail wird nie beantwortet oder eingestuft -
+            # vor jedem IMAP-Zugriff. Fehlt die Richtung: wie gesendet (fail closed).
+            return None, _json({"fehler": GESENDET_FEHLER}), None, False
         konto = _q("select kennung, quelle, aktiv from post_konten "
                    "where id = %s", (str(mail["konto_id"]),))
         zeile = _q("select imap_uid, message_id, message_id_ersatz from post_mails "
-                   "where id = %s", (str(mail["id"]),))
+                   "where id = %s and richtung = 'eingang'", (str(mail["id"]),))
         if not konto or not konto[0]["aktiv"] or not zeile:
             return None, nicht_da, None, False
         if zeile[0]["message_id_ersatz"]:

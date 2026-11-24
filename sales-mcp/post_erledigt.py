@@ -37,8 +37,9 @@ def stichtag_sql() -> str:
 
 
 def offen_sql() -> str:
-    """WHERE-Fragment fuer `post_mails m`, ohne Parameter. Ohne Stichtag ist nichts offen."""
-    return ("(m.ziel = 'posteingang' and m.status = 'eingeordnet' "
+    """WHERE-Fragment fuer `post_mails m`, ohne Parameter. Ohne Stichtag ist nichts offen.
+    Offen kann nur eingehende Post sein."""
+    return ("(m.richtung = 'eingang' and m.ziel = 'posteingang' and m.status = 'eingeordnet' "
             "and m.erledigt_am is null and m.abgeglichen_am is not null "
             f"and m.geloescht_am is null and {stichtag_sql()})")
 
@@ -86,10 +87,11 @@ def erledigen(b: Betrachter, mail_id: str, art: str) -> bool:
     if art == "bezahlt" and m["fach"] != RECHNUNGEN:
         return False
     bezahlt = ", bezahlt_am = now()" if art == "bezahlt" else ""
+    # Gesendete Mails sind nie offen und werden nie erledigt.
     zeilen = server._q(
         "update post_mails set erledigt_am = now(), erledigt_art = %s"
-        f"{bezahlt} where id = %s and besitzer = %s and erledigt_am is null "
-        "returning id", (art, m["id"], b.name))
+        f"{bezahlt} where id = %s and besitzer = %s and richtung = 'eingang' "
+        "and erledigt_am is null returning id", (art, m["id"], b.name))
     return bool(zeilen)
 
 
@@ -102,7 +104,8 @@ def wieder_oeffnen(b: Betrachter, mail_id: str) -> bool:
         "update post_mails set erledigt_am = null, erledigt_art = null, "
         "bezahlt_am = null, abgleich_aus = true, "
         "abgeglichen_am = coalesce(abgeglichen_am, now()) "
-        "where id = %s and besitzer = %s and erledigt_am is not null returning id", (m["id"], b.name))
+        "where id = %s and besitzer = %s and richtung = 'eingang' "
+        "and erledigt_am is not null returning id", (m["id"], b.name))
     return bool(zeilen)
 
 
@@ -139,6 +142,7 @@ select m.id, m.imap_uid, m.message_id, m.message_id_ersatz, m.ordner, m.ordner_u
              and trim(both '<>' from d.antwort_auf) = m.message_id)) as entwurf_gesendet
   from post_mails m
  where m.konto_id = %(konto)s and m.besitzer = %(besitzer)s
+   and m.richtung = 'eingang'
    and m.ziel = 'posteingang' and m.status = 'eingeordnet'
    and m.erledigt_am is null and not m.abgleich_aus and m.geloescht_am is null
    and {stichtag_sql()}

@@ -52,6 +52,8 @@ ZIEL_WAHL = ("posteingang", "zur_info")
 AUFRUFE_JE_MAIL = 2
 HINWEISE = {"freigegeben": "Das Jahr ist freigegeben.",
             "schon": "Dieses Jahr war schon freigegeben. Nichts geändert."}
+# Fester Text, mit dem jede schreibende Mail-Route eine gesendete Mail ablehnt.
+GESENDET_TEXT = "Gesendete Mails lassen sich hier nicht ändern."
 
 _STIL = """<style>
 .post { display: grid; grid-template-columns: 15rem 1fr; gap: 1.2rem; }
@@ -124,8 +126,9 @@ def routen(ui) -> list:
         """({(bereich, fach): anzahl}, {(bereich, fach, unterfach): anzahl})
         über die sichtbaren Mails - eine Abfrage, dieselbe Grenze wie die
         Liste (sichtbar_sql). Das Fach zählt alle seine Mails, das Unterfach
-        nur die, die eines tragen."""
+        nur die, die eines tragen. Fächer zählen nur eingehende Mails."""
         wo, params = ps.sichtbar_sql(b)
+        wo += " and m.richtung = 'eingang'"
         if ansicht:
             wo += " and " + ps.ziel_sql(ansicht)
         zeilen = server._q(
@@ -194,7 +197,7 @@ def routen(ui) -> list:
         zeilen = server._q(
             "select k.id, k.kennung from post_konten k where k.besitzer = %s "
             "or exists (select 1 from post_mails m where m.konto_id = k.id "
-            f"and {wo}) order by k.kennung", [b.name] + params)
+            f"and m.richtung = 'eingang' and {wo}) order by k.kennung", [b.name] + params)
         return {str(z["id"]): z["kennung"] for z in zeilen}
 
     def kontostand(b) -> str:
@@ -208,7 +211,10 @@ def routen(ui) -> list:
             "  and m.fach = %s) as unklar, "
             "count(m.id) filter (where m.status = 'neu') as neu, "
             "count(m.id) filter (where m.status = 'fehler') as fehler "
+            # Nur eingehende Mails zählen (die Bedingung im Join, sonst fiele ein
+            # Konto ohne eingehende Mail aus der Liste).
             "from post_konten k left join post_mails m on m.konto_id = k.id "
+            "and m.richtung = 'eingang' "
             "where k.besitzer = %s and k.aktiv "
             "group by k.id order by k.kennung", (ps.UNKLAR, ps.UNKLAR, b.name))
         if not zeilen:
@@ -470,6 +476,15 @@ def routen(ui) -> list:
         teile.append("</section>")
         return "".join(teile)
 
+    def gesendet_abgelehnt(m):
+        """Fehlerseite, wenn `m` eine gesendete Mail ist, sonst None. Jede
+        schreibende Mail-Route ruft das genau einmal, bevor sie etwas ändert:
+        Fach, Ziel, Erledigt und Kontakt gibt es nur für eingehende Post.
+        Fehlt die Richtung, gilt die Mail als gesendet (fail closed)."""
+        if m.get("richtung") != "eingang":
+            return ui._fehlerseite(400, "Gesendete Mail", GESENDET_TEXT)
+        return None
+
     def aktion_pruefen(request, form, b, m):
         """Gemeinsame Pruefung der Knopf-Routen: Fehlerseite oder None."""
         if b is None:
@@ -481,7 +496,7 @@ def routen(ui) -> list:
             return ui._fehlerseite(403, "Nicht erlaubt",
                                    "Das darf nur, wem das Postfach gehört. "
                                    "Nichts geändert.")
-        return None
+        return gesendet_abgelehnt(m)
 
     def zurueck_ziel(form, m) -> str:
         # Nur der Posteingang ist als Ruecksprung erlaubt, nie eine fremde Adresse.
@@ -602,6 +617,9 @@ def routen(ui) -> list:
             return ui._fehlerseite(403, "Nicht erlaubt",
                                    "Korrigieren darf nur, wem das Postfach gehört. "
                                    "Nichts geändert.")
+        abgelehnt = gesendet_abgelehnt(m)
+        if abgelehnt is not None:
+            return abgelehnt
         bereich = str(form.get("bereich") or "")
         fach = str(form.get("fach") or "")
         if not ps.fach_gueltig(bereich, fach):
@@ -695,6 +713,9 @@ def routen(ui) -> list:
             return ui._fehlerseite(403, "Nicht erlaubt",
                                    "Übernehmen darf nur, wem das Postfach gehört. "
                                    "Nichts geändert.")
+        abgelehnt = gesendet_abgelehnt(m)
+        if abgelehnt is not None:
+            return abgelehnt
         wahl = str(form.get("wahl") or "")
         vorschlaege = m["vorschlaege"] if isinstance(m["vorschlaege"], dict) else {}
         v = vorschlaege.get(wahl) if wahl in ("sortierer", "pruefer") else None
@@ -728,6 +749,9 @@ def routen(ui) -> list:
             return ui._fehlerseite(403, "Nicht erlaubt",
                                    "Die Ablage ändern darf nur, wem das Postfach gehört. "
                                    "Nichts geändert.")
+        abgelehnt = gesendet_abgelehnt(m)
+        if abgelehnt is not None:
+            return abgelehnt
         ziel = str(form.get("ziel") or "")
         if ziel not in ZIEL_WAHL or m["status"] == "geloescht":
             return ui._fehlerseite(400, "Ungültiges Ziel",

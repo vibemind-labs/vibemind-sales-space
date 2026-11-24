@@ -119,8 +119,10 @@ def _eintragen(mail_id, adresse: str) -> None:
 # Zeilen, fuer die nachtragen etwas abrufen kann: Adresse noch nicht geprueft, nicht sensibel,
 # nicht geloescht, und mit nutzbarer UID im jeweiligen Ordner (wie _uid_fuer). Zeilen ohne UID
 # stehen hier nicht drin, sonst fuellten sie das Limit jedes Laufs und er endete ohne Fortschritt.
+# Nur eingehende Mails: die urspruengliche Empfaengeradresse hat nur, was hereinkam.
 _OFFEN_SQL = (
-    "from post_mails where konto_id = %s and urspruengliche_adresse is null "
+    "from post_mails where konto_id = %s and richtung = 'eingang' "
+    "and urspruengliche_adresse is null "
     "and sensibel is not true and status <> 'geloescht' "
     "and ((coalesce(ordner, 'INBOX') = 'INBOX' and imap_uid > 0) "
     "  or (coalesce(ordner, 'INBOX') <> 'INBOX' and ordner_uid > 0))")

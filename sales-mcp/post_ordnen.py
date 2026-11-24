@@ -74,12 +74,14 @@ class _Ruhen(Exception):
 # post_abholen hat die INBOX nach einem UIDVALIDITY-Wechsel neu nummeriert und die Mail
 # (noch) nicht wiedergefunden. Sie werden uebersprungen, nicht als fehlt markiert, denn
 # das Abholen holt hoechstens einen Stapel je Runde und findet sie spaeter wieder.
+# Gesendete Mails werden nie verschoben oder geloescht (Spec 1.4): nur `eingang`.
 _OFFENE_SQL = f"""
 select m.id, m.imap_uid, m.message_id, m.message_id_ersatz, m.von, m.ziel, m.ordner,
        m.ordner_uid, m.ordner_am, extract(year from m.datum)::int as jahr,
        (m.ziel = 'loeschen' or (m.ziel = 'to_review' and m.ordner = 'To-Review')) as loeschen
   from post_mails m
  where m.konto_id = %(konto)s and m.besitzer = %(besitzer)s
+   and m.richtung = 'eingang'
    and m.status = 'eingeordnet' and m.ziel is not null
    and (m.ordner_stand is null or m.ordner_stand = 'ok')
    and not (m.ordner = 'INBOX' and m.imap_uid <= 0)
