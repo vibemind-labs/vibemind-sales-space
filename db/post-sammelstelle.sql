@@ -379,3 +379,116 @@ begin
                  'post_mails_anweisung_entscheid_check check '
                  '(anweisung_entscheid in (''freigegeben'',''gesperrt''))', s);
 end $$;
+
+-- ---------------------------------------------------------------------------
+-- Post-Assistent Stufe 1 (24.11.2026): gesendete Mails in der Sammelstelle.
+-- Bestandszeilen sind alle 'eingang'. Alles idempotent.
+-- ---------------------------------------------------------------------------
+alter table :"schema".post_mails
+  add column if not exists richtung text not null default 'eingang',
+  add column if not exists in_reply_to text,
+  add column if not exists referenzen text[] not null default '{}',
+  add column if not exists unterhaltung uuid,
+  add column if not exists kopf_nachgelesen boolean not null default false;
+
+-- Checks, Unique und Indizes. Der alte Unique (konto_id, imap_uid) ist inline
+-- angelegt und hat einen erzeugten Namen: er wird per pg_constraint gesucht.
+do $$
+declare
+  s text := current_setting('post.schema');
+  alt record;
+begin
+  if not exists (
+      select 1 from pg_constraint c
+      where c.conrelid = format('%I.post_mails', s)::regclass
+        and c.conname = 'post_mails_richtung_check') then
+    execute format('alter table %I.post_mails add constraint '
+                   'post_mails_richtung_check check '
+                   '(richtung in (''eingang'',''gesendet''))', s);
+  end if;
+
+  if not exists (
+      select 1 from pg_constraint c
+      where c.conrelid = format('%I.post_mails', s)::regclass
+        and c.conname = 'post_mails_status_check'
+        and pg_get_constraintdef(c.oid) like '%gesendet%') then
+    execute format('alter table %I.post_mails drop constraint if exists '
+                   'post_mails_status_check', s);
+    execute format('alter table %I.post_mails add constraint '
+                   'post_mails_status_check check (status in '
+                   '(''neu'',''eingeordnet'',''fehler'',''geloescht'','
+                   '''gesendet''))', s);
+  end if;
+
+  if not exists (
+      select 1 from pg_constraint c
+      where c.conrelid = format('%I.post_mails', s)::regclass
+        and c.conname = 'post_mails_richtung_status') then
+    execute format('alter table %I.post_mails add constraint '
+                   'post_mails_richtung_status check '
+                   '((richtung = ''gesendet'') = (status = ''gesendet''))', s);
+  end if;
+
+  -- Alten Unique (konto_id, imap_uid) suchen und ersetzen.
+  for alt in
+    select c.conname from pg_constraint c
+    where c.conrelid = format('%I.post_mails', s)::regclass
+      and c.contype = 'u'
+      and (select array_agg(a.attname::text order by a.attname)
+             from unnest(c.conkey) k
+             join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k)
+          = array['imap_uid','konto_id']
+  loop
+    execute format('alter table %I.post_mails drop constraint %I',
+                   s, alt.conname);
+  end loop;
+  if not exists (
+      select 1 from pg_constraint c
+      where c.conrelid = format('%I.post_mails', s)::regclass
+        and c.conname = 'post_mails_konto_richtung_uid') then
+    execute format('alter table %I.post_mails add constraint '
+                   'post_mails_konto_richtung_uid unique '
+                   '(konto_id, richtung, imap_uid)', s);
+  end if;
+end $$;
+
+create index if not exists post_mails_in_reply_to_idx
+  on :"schema".post_mails (besitzer, in_reply_to);
+create index if not exists post_mails_referenzen_idx
+  on :"schema".post_mails using gin (referenzen);
+create index if not exists post_mails_unterhaltung_idx
+  on :"schema".post_mails (besitzer, unterhaltung);
+
+-- Stand des Gesendet-Ordners je Konto (der INBOX-Stand bleibt in post_konten).
+create table if not exists :"schema".post_ordner_stand (
+  konto_id uuid not null references :"schema".post_konten(id) on delete cascade,
+  richtung text not null check (richtung = 'gesendet'),
+  ordner text not null,
+  uidvalidity bigint,
+  letzte_uid bigint,
+  altbestand_fertig boolean not null default false,
+  primary key (konto_id, richtung)
+);
+
+-- Rechte fuer die neue Tabelle, Regeln wie im Rechte-Block oben.
+do $$
+declare
+  s text := current_setting('post.schema');
+  rolle text;
+  rechte text := 'select, insert, update';
+begin
+  if s = 'sales' then
+    rolle := 'sales_app';
+  elsif s = 'sales_test' then
+    rolle := 'sales_app';
+    rechte := 'select, insert, update, delete, truncate';
+  elsif exists (
+      select 1 from pg_roles where rolname = 'sales_app_' || substr(s, 7)) then
+    rolle := 'sales_app_' || substr(s, 7);
+  end if;
+  if rolle is null then
+    raise notice 'WARNUNG: keine Rechte vergeben fuer Schema %: Rolle % existiert nicht', s, 'sales_app_' || substr(s, 7);
+    return;
+  end if;
+  execute format('grant %s on %I.post_ordner_stand to %I', rechte, s, rolle);
+end $$;

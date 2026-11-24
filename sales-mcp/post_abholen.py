@@ -321,7 +321,7 @@ def _speichern(zeile: dict, uid: int, mail: dict | None) -> bool:
                     "von, an, betreff, datum, text, auszug, anhaenge, status, fehler, "
                     "bereich, fach, message_id_ersatz, kalenderteil, urspruengliche_adresse) values "
                     "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
-                    "on conflict (konto_id, imap_uid) do nothing returning id",
+                    "on conflict (konto_id, richtung, imap_uid) do nothing returning id",
                     (zeile["id"], uid, mail["message_id"], zeile["besitzer"], mail["von"],
                      mail["an"], mail["betreff"], mail["datum"], mail["text"],
                      mail["auszug"], mail["anhaenge"],
