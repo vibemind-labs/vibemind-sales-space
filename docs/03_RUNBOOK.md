@@ -3973,6 +3973,18 @@ Bot, sobald das Terminende vorbei ist und seit `VEXA_STILLE_NACH_ENDE_MIN` Minut
 hat (Log: `Bot nach Terminende und Stille gestoppt`). Wer überzieht, verliert nichts, solange gesprochen wird. Endet ein
 Gespräch früh, kommt die Auswertung also spätestens 10 Minuten nach dem geplanten Ende.
 
+**Kein X-Server nach einem Neustart (23.11.2026).** Ein Neustart des Containers (VM-Neustart, `restart`) lässt `/tmp`
+stehen. Die alte Sperre `/tmp/.X99-lock` nennt dann eine PID, die jetzt ein anderer Prozess hat (damals redis). Xvfb hält
+`:99` für belegt und gibt auf (`supervisorctl status`: `vexa:xvfb FATAL`, dazu fluxbox und x11vnc). Jeder Bot scheitert
+dann, die Akte steht auf `fehlgeschlagen` mit „Missing X server or $DISPLAY“. Seitdem räumt der Einstieg von `vexa-lite`
+(`entrypoint` in `deploy/vexa/docker-compose.yml`) die Sperre vor `/entrypoint.sh` weg. Von Hand im laufenden Container,
+ohne die anderen Dienste anzufassen:
+
+    timeout 60 docker exec vexa-lite timeout 50 sh -c 'rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 && supervisorctl -c /etc/supervisor/conf.d/vexa.conf start vexa:xvfb vexa:fluxbox vexa:x11vnc'
+
+Eine Akte, die daran gescheitert ist, schickt den Bot erst wieder, wenn sie auf `geplant` steht (Status `fehlgeschlagen`,
+keine Vexa-Ids, Ende noch nicht vorbei).
+
 **Rückbau** (trifft nur das Projekt `vexa`):
 
     VEXA_C="docker compose -f $HOME/sales-claw/deploy/vexa/docker-compose.yml -p vexa"
@@ -3987,7 +3999,8 @@ Nie `docker system prune` oder `docker volume prune`, nie `--remove-orphans`, ni
 externe Netz `sales-claw_default` gehört dem Basis-Stack und bleibt unberührt.
 
 **Prüfung der Dateien** (ohne Daemon, ohne Netz): `bash deploy/tests/test_vexa_compose.sh` — jedes `image:` mit Digest,
-alle `ports:` auf `127.0.0.1`, Projektname `vexa`, Volumes mit Präfix `vexa-`, nur `vexa-tor` auf `sales-claw_default`;
+alle `ports:` auf `127.0.0.1`, Projektname `vexa`, Volumes mit Präfix `vexa-`, nur `vexa-tor` auf `sales-claw_default`,
+der Einstieg von `vexa-lite` räumt die alte X-Sperre weg;
 `docker compose config` läuft mit, wenn Docker am Ort vorhanden ist. `bash deploy/tests/test_vexa_anbinden.sh` prüft das
 Anbinde-Skript gegen Attrappen für `docker` und `curl`.
 

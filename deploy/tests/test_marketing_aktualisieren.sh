@@ -107,6 +107,34 @@ echo "$out" | grep -q "restart marketing-api" || {
   echo "FEHLER: Neustart nach gescheiterter Ablage nicht erreicht"; exit 1; }
 [ "$(cat "$STAND")" = "$(git -C "$T/marketing-os" rev-parse HEAD)" ]
 
+# 6d) origin aendert den Verweis eines Submoduls, das im schlanken Checkout nie
+#     ausgecheckt ist (VM 23.11.2026: spaces/desktop/Automation_ui): das
+#     Abholen darf daran nicht scheitern - vorspulen und Neustart wie sonst.
+#     Die Verweise zeigen auf Commits, die es nirgends gibt; die URL auch nicht.
+verweis() { ( cd "$T/arbeit" && git update-index --add --cacheinfo "160000,$1,spaces/desktop/Automation_ui" ); }
+printf '[submodule "spaces/desktop/Automation_ui"]\n\tpath = spaces/desktop/Automation_ui\n\turl = %s\n' \
+  "$T/gibt-es-nicht.git" > "$T/arbeit/.gitmodules"
+( cd "$T/arbeit" && git add .gitmodules )
+verweis 1111111111111111111111111111111111111111
+( cd "$T/arbeit" && git -c user.name=t -c user.email=t@t commit -qm submodul && git push -q origin master )
+MARKETING_OS="$T/marketing-os" bash "$SKRIPT" >/dev/null 2>&1 || {
+  echo "FEHLER: neues Submodul brach das Vorspulen ab"; exit 1; }
+# Schlanker Klon wie auf der VM: nur spaces/marketing ausgecheckt.
+git clone -q --no-checkout -b master "$T/origin.git" "$T/schlank"
+( cd "$T/schlank" && git sparse-checkout set spaces/marketing && git checkout -q master )
+MARKETING_OS="$T/schlank" bash "$SKRIPT" >/dev/null 2>&1
+# Ohne `commit` (git commit -a): -a naehme den Verweis als geloescht, weil
+# sein Ordner im Arbeitsklon fehlt.
+verweis 2222222222222222222222222222222222222222
+( cd "$T/arbeit" && echo f > spaces/marketing/x && git add spaces/marketing/x \
+  && git -c user.name=t -c user.email=t@t commit -qm verweis && git push -q origin master )
+[ "$(git -C "$T/arbeit" ls-tree HEAD spaces/desktop/Automation_ui | cut -c1-6)" = 160000 ]
+out="$(MARKETING_OS="$T/schlank" bash "$SKRIPT" 2>&1)" || {
+  echo "FEHLER: geaenderter Submodul-Verweis brach das Vorspulen ab:"; echo "$out"; exit 1; }
+echo "$out" | grep -q "restart marketing-api"
+[ "$(cat "$T/schlank/spaces/marketing/x")" = f ]
+[ "$(cat "$T/schlank/.git/marketing-api-gestartet")" = "$(git -C "$T/schlank" rev-parse HEAD)" ]
+
 # 7) lokale Aenderung: Abbruch mit Nicht-Null, nichts ueberschrieben
 echo lokal > "$T/marketing-os/spaces/marketing/x"
 if MARKETING_OS="$T/marketing-os" bash "$SKRIPT"; then

@@ -15,6 +15,7 @@
   "_kommentar_post": "03.11.2026: Agent post (sales-post, Einordnung der Post-Sammelstelle) liest jede Mail einmal - er hat ein EIGENES Modell ohne fallbacks. Die Vorgabe fallbacks [openrouter/free] wuerde Mailinhalte bei erschoepftem Abo an ein kostenloses Fremdmodell schicken; dann lieber kein Ergebnis (sales-post wiederholt spaeter). deploy/post-anbinden.sh setzt genau diesen Eintrag und bricht ab, wenn das Gateway ihn ablehnt.",
   "_kommentar_pruefer": "04.11.2026: Agent post-pruefer (Post-Einordnung v2) liest dieselben Mails ein zweites Mal und prueft das Urteil von post - mit eigenem, staerkerem Modell (claude-sonnet-5-5, eigener Modelleintrag wie claude-haiku-5-5) und aus demselben Grund ohne fallbacks und ohne Werkzeuge. Ob das Live-Gateway das Modell kennt, zeigt erst post-anbinden.sh: lehnt es den Eintrag ab, bricht das Skript ab und registriert KEINEN der beiden Agenten (ein Agent ohne eigenes Modell fiele auf openrouter/free zurueck).",
   "_kommentar_auto": "29.10.2026: sales-auto ruft das Gateway synchron ueber /v1/chat/completions (Agent auto). Der Agent auto hat KEIN Werkzeug (tools.deny ['*'], gemessen: auch exec/message weg, die mitgeschickte Funktion antwort_abgeben bleibt) und einen eigenen, fast leeren Arbeitsordner - die Regeln schickt sales-auto als Systemnachricht mit. main bleibt erster Eintrag = Standard-Agent. Der Endpunkt ist Operator-Zugriff: Port 18894 bleibt im Compose-Netz bzw. auf 127.0.0.1.",
+  "_kommentar_auftrag": "23.11.2026: Agent auftrag = Kennung fuer Auftraege des Gehirns aus dem Auftragsbuch (sales-mcp/auftrag_abholer.py). KEIN Werkzeug (tools.deny ['*'], Muster auto/post): der Agent kann nichts aufrufen, also auch nichts freigeben; der Abholer fragt ihn nur mit fest vorgegebenem Funktionsaufruf und fuehrt selbst aus. Eigenes Modell ohne fallbacks, weil ein Auftrag Mailinhalte tragen kann (Begruendung wie bei post). Diese Saat wirkt nur auf eine frische Installation; im laufenden Gateway muss der Eintrag eigens gesetzt und mit GET /v1/models geprueft werden (docs/12_AUFTRAG_EMPFANG.md). Solange keine freigeschaltete Auftragsart ein Urteil braucht, wird der Agent nie aufgerufen.",
   "agents": {
     "defaults": {
       "model": {
@@ -54,6 +55,15 @@
         "tools": { "deny": ["*"] },
         "model": {
           "primary": "anthropic/claude-sonnet-5-5",
+          "fallbacks": []
+        }
+      },
+      {
+        "id": "auftrag",
+        "workspace": "/home/node/.openclaw/workspace-auftrag",
+        "tools": { "deny": ["*"] },
+        "model": {
+          "primary": "anthropic/claude-haiku-5-5",
           "fallbacks": []
         }
       }

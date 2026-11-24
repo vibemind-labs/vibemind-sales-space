@@ -1306,6 +1306,40 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Auftrag-Abholer (docs/12_AUFTRAG_EMPFANG.md): holt Auftraege des Gehirns (von = 'brain', an = 'sales')
+  # ueber die Huellen auftrag.sales_empfang_* ab und schreibt nur Zahlen bzw. Treffer zurueck. Nur lesende
+  # Arten; kein Versand: weder SMTP- noch Postfach- noch Kanal-Zugaenge. Kalender nur ueber CalDAV wie
+  # sales-mcp (termine_heute). Startet nur, wenn AUFTRAGSBUCH_LADEN gleich LADEN_PRAEFIX ist.
+  # Namentlich starten (docker compose up -d --no-deps auftrag-abholer), nie ein blankes up -d.
+  auftrag-abholer:
+    build: ./sales-mcp
+    image: sales-claw-sales-mcp:local
+    container_name: ${LADEN_PRAEFIX:-sales}-auftrag-abholer
+    command: python -m auftrag_abholer
+    restart: unless-stopped
+    environment:
+      - SALES_DB_URL=${SALES_DB_URL}
+      - SALES_DB_SCHEMA=${SALES_DB_SCHEMA:-sales}
+      - TZ=${TZ:-Europe/Berlin}
+      - LADEN_PRAEFIX=${LADEN_PRAEFIX:-sales}
+      # Kein ":?" hier: Compose loest ALLE Dienste auf, auch fuer Laeden mit eigener --env-file, in
+      # denen der Abholer nie laeuft (update.sh brach daran ab). Fehlt der Wert, startet der Abholer
+      # selbst nicht ("AUFTRAGSBUCH_LADEN fehlt").
+      - AUFTRAGSBUCH_LADEN=${AUFTRAGSBUCH_LADEN:-}
+      - AUFTRAG_ARTEN_FREI=${AUFTRAG_ARTEN_FREI:-kontakt_finden}
+      - AUFTRAG_TEST_KONTAKT_ID=${AUFTRAG_TEST_KONTAKT_ID:-}
+      - POST_BESITZER=${POST_BESITZER:-}
+      - CALDAV_URL=${CALDAV_URL:-}
+      - CALDAV_USER=${CALDAV_USER:-}
+      - CALDAV_PASSWORT=${CALDAV_PASSWORT:-}
+      - CALDAV_USER_AGENT=${CALDAV_USER_AGENT:-}
+      - CALDAV_TIMEOUT_S=8
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 networks:
   # Netz des Compose-Projekts pm-claw (Projektname dort gepinnt). Nur der
   # Dienst sales-claw haengt daran, siehe dort.

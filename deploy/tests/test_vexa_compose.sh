@@ -105,6 +105,15 @@ fi
 if echo "$LITE" | grep -qE 'ANTHROPIC_|HOST_CLAUDE_CREDENTIALS|docker\.sock'; then
   fehler "vexa-lite: Agent-Schluessel oder Docker-Socket gesetzt (Spec 5.4: Agent aus)"
 fi
+# Alte X-Sperre (23.11.2026): nach einem Neustart des Containers bleibt /tmp
+# stehen. /tmp/.X99-lock nennt dann eine PID, die jetzt ein anderer Prozess hat,
+# Xvfb startet nicht und kein Bot kommt ins Meeting. Der Einstieg raeumt die
+# Sperre vor /entrypoint.sh weg; command muss mit, weil ein eigenes entrypoint
+# das CMD des Abbilds verwirft.
+echo "$LITE" | grep -qE '^[[:space:]]+entrypoint:.*rm -f /tmp/\.X99-lock /tmp/\.X11-unix/X99 && exec /entrypoint\.sh \\"\$\$@\\"' \
+  || fehler "vexa-lite: Einstieg raeumt die alte X-Sperre nicht vor /entrypoint.sh weg"
+echo "$LITE" | grep -qE '^[[:space:]]+command:[[:space:]]*\["supervisord", "-n", "-c", "/etc/supervisor/conf\.d/vexa\.conf"\][[:space:]]*$' \
+  || fehler "vexa-lite: command nicht supervisord -n -c /etc/supervisor/conf.d/vexa.conf"
 # Whisper: Modell, kein curl im Healthcheck (Image hat keins), Python-Pruefung.
 WHISPER="$(block vexa-lite-whisper)"
 echo "$WHISPER" | grep -qE 'WHISPER__MODEL:[[:space:]]*"?Systran/faster-whisper-small"?[[:space:]]*$' || fehler "Whisper-Modell nicht Systran/faster-whisper-small"
