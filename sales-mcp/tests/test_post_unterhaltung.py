@@ -334,3 +334,30 @@ def test_unterhaltung_respektiert_sichtbarkeit(monkeypatch):
     assert gesendet and gesendet[0]["auszug"] is None and gesendet[0]["an"] is None
     monkeypatch.delenv("POST_BESITZER")
     assert post_struktur.unterhaltung_lesen(post_struktur.BETREIBER_AGENT, m1) == []
+
+
+def test_unterhaltung_lesen_grenze_behaelt_neueste_und_angesehene():
+    import post_struktur
+    _konto()
+    ids = [_roh("gmx-test", "g1@x", tage=0)]
+    for n in range(2, 6):
+        ids.append(_roh("gmx-test", f"g{n}@x", tage=n - 1, in_reply_to=f"g{n - 1}@x"))
+    neueste = post_struktur.unterhaltung_lesen(_felix(), ids[4], grenze=3)
+    assert [str(x["id"]) for x in neueste] == ids[2:]
+    aelteste = post_struktur.unterhaltung_lesen(_felix(), ids[0], grenze=3)
+    assert [str(x["id"]) for x in aelteste] == [ids[0], ids[3], ids[4]]
+
+
+def test_sichtbar_sql_alias_und_standard_unveraendert(monkeypatch):
+    import post_struktur as ps
+    monkeypatch.setenv("POST_BESITZER", "felix")
+    anna = ps.Betrachter(name="anna", leitung=True, abteilungen=("Vertrieb",))
+    assert ps.sichtbar_sql(_felix()) == ("(m.besitzer = %s)", ["felix"])
+    assert ps.sichtbar_sql(anna) == ("(m.besitzer = %s)", ["anna"])
+    assert ps.sichtbar_sql(ps.BETREIBER_AGENT) == (
+        "(m.bereich = 'business' and m.sensibel is false and m.besitzer = %s)", ["felix"])
+    assert ps.sichtbar_sql(_felix(), "u") == ("(u.besitzer = %s)", ["felix"])
+    w, p = ps.sichtbar_sql(ps.BETREIBER_AGENT, "u")
+    assert "m." not in w and w.count("u.") == 3 and p == ["felix"]
+    monkeypatch.delenv("POST_BESITZER")
+    assert ps.sichtbar_sql(ps.BETREIBER_AGENT, "u") == ("false", [])

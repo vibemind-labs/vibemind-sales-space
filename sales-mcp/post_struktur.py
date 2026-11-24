@@ -229,8 +229,9 @@ def betrachter_laden(name: str) -> "Betrachter | None":
                       abteilungen=tuple(a["abteilung"] for a in abt))
 
 
-def sichtbar_sql(b: Betrachter) -> tuple[str, list]:
-    """(WHERE-Fragment mit %s-Platzhaltern, Parameter) fuer `from post_mails m`.
+def sichtbar_sql(b: Betrachter, alias: str = "m") -> tuple[str, list]:
+    """(WHERE-Fragment mit %s-Platzhaltern, Parameter) fuer `from post_mails <alias>`
+    (Standard `m`; `alias` fuer Unterabfragen).
 
     Ein Container = ein Nutzer (DSGVO): Mails sieht nur ihr Besitzer, egal in
     welchem Bereich - Leitung und Abteilungen nicht. Der Bot sieht nur die
@@ -241,9 +242,9 @@ def sichtbar_sql(b: Betrachter) -> tuple[str, list]:
         besitzer = container_besitzer()
         if not besitzer:
             return ("false", [])
-        return ("(m.bereich = 'business' and m.sensibel is false "
-                "and m.besitzer = %s)", [besitzer])
-    return ("(m.besitzer = %s)", [b.name])
+        return (f"({alias}.bereich = 'business' and {alias}.sensibel is false "
+                f"and {alias}.besitzer = %s)", [besitzer])
+    return (f"({alias}.besitzer = %s)", [b.name])
 
 
 # 3a: Den Inhalt einer Mail liest der Agent nur, wenn sie geprueft ist und
@@ -440,21 +441,25 @@ def mail_lesen(b: Betrachter, mail_id: str) -> "dict | None":
 
 
 def unterhaltung_lesen(b: Betrachter, mail_id: str, grenze: int = 50) -> list[dict]:
-    """Alle Mails der Unterhaltung von `mail_id`, die `b` sehen darf, nach Datum
+    """Mails der Unterhaltung von `mail_id`, die `b` sehen darf, nach Datum
     aufsteigend (beide Richtungen). Ist die Mail selbst unsichtbar, unbekannt
-    oder ohne Unterhaltung, kommt `[]`. Sichtbarkeit und Agenten-Sperre kommen aus
-    `sichtbar_sql` und `_spalten`; es gibt hier keine zweite Regel."""
+    oder ohne Unterhaltung, kommt `[]`. Ist die Unterhaltung laenger als `grenze`,
+    bleiben die neuesten `grenze` Mails, und die angesehene Mail ist immer dabei.
+    Sichtbarkeit und Agenten-Sperre kommen aus `sichtbar_sql` und `_spalten`;
+    es gibt hier keine zweite Regel."""
     import server
     try:
         mid = str(uuid.UUID(str(mail_id)))
     except ValueError:
         return []
     where, params = sichtbar_sql(b)
+    innen, innen_params = sichtbar_sql(b, "u")
     return server._q(
-        f"select {_spalten(agent=b.ist_agent)} from post_mails m where {where} "
+        "select * from (select "
+        f"{_spalten(agent=b.ist_agent)} from post_mails m where {where} "
         "and m.status <> 'geloescht' and m.unterhaltung is not null "
         "and m.unterhaltung = (select u.unterhaltung from post_mails u "
-        f"where u.id = %s and {where.replace('m.', 'u.')}) "
-        "order by m.datum asc nulls last, m.gesehen_am asc, m.id "
-        "limit %s",
-        params + [mid] + params + [max(1, min(int(grenze), 200))])
+        f"where u.id = %s and {innen}) "
+        "order by (m.id = %s) desc, m.datum desc nulls last, m.gesehen_am desc, m.id desc "
+        "limit %s) x order by x.datum asc nulls last, x.gesehen_am asc, x.id",
+        params + [mid] + innen_params + [mid, max(1, min(int(grenze), 200))])

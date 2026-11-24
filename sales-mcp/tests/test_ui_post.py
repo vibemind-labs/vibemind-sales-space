@@ -1132,7 +1132,8 @@ def test_gesendete_ansicht_ohne_knoepfe():
     _verbinden(eingang, antwort)
     r = _get("t8_anna", f"/post/mail/{antwort}")
     assert r.status_code == 200 and "Gesendet" in r.text
-    for aktion in ("/korrigieren", "/ziel", "/erledigt", "/kontakt"):
+    for aktion in ("/korrigieren", "/ziel", "/erledigt", "/kontakt",
+                   "/vorschlag", "/wieder-offen"):
         assert f"/post/mail/{antwort}{aktion}" not in r.text
     # Gegenprobe: die eingehende Mail hat ihre Knöpfe weiter.
     assert f"/post/mail/{eingang}/korrigieren" in _get("t8_anna", f"/post/mail/{eingang}").text

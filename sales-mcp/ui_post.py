@@ -626,12 +626,12 @@ def routen(ui) -> list:
                 + (' · <a href="/freigaben?tab=nachrichten&amp;art=anweisung">'
                    'In den Freigaben ansehen</a>' if not frei else "")
                 + '</p>')
-        gesendet = m.get("richtung") == "gesendet"
-        if not gesendet:
+        # Fail closed wie gesendet_abgelehnt: Knöpfe nur für eindeutig eingehende Post.
+        eingang = m.get("richtung") == "eingang"
+        if eingang:
             teile.append(erledigt_bereich(request, b, m))
         teile.append(unterhaltung_bereich(b, m))
-        # Gesendete Mails haben kein Fach, Ziel oder Erledigt: keine Knöpfe.
-        if not gesendet and darf_korrigieren(request, b, m):
+        if eingang and darf_korrigieren(request, b, m):
             teile.append(ziel_formulare(m))
             teile.append(vorschlag_formulare(m, regel_angeboten(b, m)))
             teile.append(korrektur_formular(m, regel_angeboten(b, m)))
