@@ -904,8 +904,12 @@ def eine_runde() -> dict:
                         type(e).__name__)
     if _STOPP.is_set():
         return bilanz
-    _unterhaltungen_nachziehen(bilanz)
-    _einordnen(bilanz)
+    try:
+        _einordnen(bilanz)
+    finally:
+        # Erst nach dem Einordnen: eine Eingangsmail wird dort sensibel, ihre Antwort
+        # zieht in derselben Runde nach. Auch in der Kundenpause und wenn das Einordnen wirft.
+        _unterhaltungen_nachziehen(bilanz)
     _anweisungen_nachziehen(bilanz)
     if not _STOPP.is_set():
         _aufraeumen(bilanz)
@@ -917,7 +921,7 @@ def _unterhaltungen_nachziehen(bilanz: dict) -> None:
     (Bereich, Schutz). Ruft kein Modell, laeuft also auch in der Kundenpause; ein Fehler
     kostet die Runde nicht, im Protokoll nur der Typ."""
     try:
-        bilanz["unterhaltung"] = post_unterhaltung.nachziehen()
+        bilanz["unterhaltung"] = post_unterhaltung.nachziehen(stopp=_STOPP.is_set)
     except Exception as e:  # noqa: BLE001
         LOG.warning("Unterhaltungen nicht nachgezogen (%s)", type(e).__name__)
 

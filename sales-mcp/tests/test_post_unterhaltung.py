@@ -132,11 +132,26 @@ def test_antwort_auf_sensible_mail_wird_nachtraeglich_sensibel():
                    bereich="business", text="Vertraulicher Antworttext")
     assert _zeile_von(antwort)["sensibel"] is False
     _roh("gmx-test", "m1@x", bereich="privat", sensibel=True)      # Bezug kommt spaeter
+    with server.pool.connection() as conn:
+        conn.execute("update post_mails set urspruengliche_adresse = 'x@example.org' "
+                     "where id = %s", (antwort,))
     post_unterhaltung.nachziehen()
     z = _zeile_von(antwort)
     assert z["sensibel"] is True and z["bereich"] == "privat"
     assert z["text"] is None and z["auszug"] is None and z["an"] is None
     assert z["anhaenge"] == []
+    assert z["urspruengliche_adresse"] is None
+
+
+def test_erbe_geht_nie_ueber_besitzer_hinweg():
+    _konto("felix", "felix-k")
+    _konto("ivan", "ivan-k")
+    _roh("felix-k", "gleich@x", besitzer="felix", bereich="privat", sensibel=True)
+    ivan = _roh("ivan-k", "ia@x", tage=1, richtung="gesendet", besitzer="ivan",
+                in_reply_to="gleich@x", bereich="business", text="Ivans Text")
+    assert post_unterhaltung.nachziehen()["geerbt"] == 0
+    z = _zeile_von(ivan)
+    assert z["bereich"] == "business" and z["sensibel"] is False and z["text"] == "Ivans Text"
 
 
 def test_sensibel_geht_nie_zurueck():
@@ -195,4 +210,88 @@ def test_runde_traegt_unterhaltung_in_die_bilanz(monkeypatch):
     monkeypatch.setattr(post_abholen.post_konten, "verbinden", lambda zeile: kasten)
     monkeypatch.setattr(post_einordnung, "einordnen", lambda mail, konto: _einordnung())
     bilanz = post_abholen.eine_runde()
-    assert set(bilanz["unterhaltung"]) == {"zugeordnet", "geerbt"}
+    assert set(bilanz["unterhaltung"]) == {"zugeordnet", "geerbt", "fehler"}
+
+
+def test_runde_sensibel_im_selben_durchlauf(monkeypatch):
+    _konto()
+    antwort = _roh("gmx-test", "g1@x", tage=1, richtung="gesendet", in_reply_to="e1@x",
+                   bereich="business", text="Antworttext")
+    kasten = Attrappe({1: _mail("<e1@x>")})
+    monkeypatch.setattr(post_abholen.post_konten, "verbinden", lambda zeile: kasten)
+    monkeypatch.setattr(post_einordnung, "einordnen",
+                        lambda mail, konto: _einordnung(sensibel=True))
+    post_abholen.eine_runde()
+    z = _zeile_von(antwort)
+    assert z["sensibel"] is True and z["text"] is None and z["bereich"] == "business"
+
+
+@pytest.mark.parametrize("fall", ["pause", "wirft"])
+def test_nachziehen_laeuft_auch_ohne_einordnen(monkeypatch, fall):
+    _konto()
+    antwort = _roh("gmx-test", "g1@x", tage=1, richtung="gesendet", in_reply_to="e1@x")
+    _roh("gmx-test", "e1@x", sensibel=True)
+    kasten = Attrappe({})
+    monkeypatch.setattr(post_abholen.post_konten, "verbinden", lambda zeile: kasten)
+    if fall == "pause":
+        monkeypatch.setattr(post_abholen, "kunde_aktiv", lambda: True)
+        post_abholen.eine_runde()
+    else:
+        def kaputt(bilanz):
+            raise RuntimeError("x")
+        monkeypatch.setattr(post_abholen, "_einordnen", kaputt)
+        with pytest.raises(RuntimeError):
+            post_abholen.eine_runde()
+    assert _zeile_von(antwort)["sensibel"] is True
+
+
+def test_eine_kaputte_zuordnung_stoppt_weder_rest_noch_erbe(monkeypatch, caplog):
+    _konto()
+    antwort = _roh("gmx-test", "g1@x", tage=1, richtung="gesendet", in_reply_to="m1@x",
+                   zuordnen=False)
+    _roh("gmx-test", "m1@x", tage=0, sensibel=True, zuordnen=False)
+    schlecht = _roh("gmx-test", "x1@x", tage=2, zuordnen=False)
+    gut = _roh("gmx-test", "y1@x", tage=3, zuordnen=False)
+    echt = post_unterhaltung.zuordnen
+
+    def fake(conn, mail_id):
+        if str(mail_id) == schlecht:
+            raise RuntimeError("geheim@example.org x1@x")
+        return echt(conn, mail_id)
+    monkeypatch.setattr(post_unterhaltung, "zuordnen", fake)
+    with caplog.at_level(logging.DEBUG):
+        erg = post_unterhaltung.nachziehen()
+    assert erg["fehler"] == 1 and erg["zugeordnet"] == 3
+    assert _unt(schlecht) is None and _unt(gut) is not None and _unt(antwort) is not None
+    assert _zeile_von(antwort)["sensibel"] is True
+    assert "RuntimeError" in caplog.text
+    assert "geheim" not in caplog.text and "x1@x" not in caplog.text
+
+
+def test_stopp_beendet_nur_die_zuordnung():
+    _konto()
+    a = _roh("gmx-test", "m1@x", zuordnen=False)
+    antwort = _roh("gmx-test", "g1@x", tage=1, richtung="gesendet", in_reply_to="m1@x",
+                   bereich="business", zuordnen=False)
+    with server.pool.connection() as conn:
+        conn.execute("update post_mails set bereich = 'privat' where id = %s", (a,))
+    erg = post_unterhaltung.nachziehen(stopp=lambda: True)
+    assert erg["zugeordnet"] == 0 and _unt(a) is None
+    assert erg["geerbt"] == 1 and _zeile_von(antwort)["bereich"] == "privat"
+
+
+def test_speichern_behaelt_mail_und_stand_wenn_zuordnen_scheitert(monkeypatch, caplog):
+    _konto()
+
+    def kaputt(conn, mail_id):
+        raise RuntimeError("geheim@example.org <e1@x>")
+    monkeypatch.setattr(post_unterhaltung, "zuordnen", kaputt)
+    with caplog.at_level(logging.DEBUG):
+        assert post_abholen.konto_abholen(_zeile("gmx-test"), Attrappe({1: _mail("<e1@x>")})) == 1
+    zeilen = _mails()
+    assert len(zeilen) == 1 and zeilen[0]["unterhaltung"] is None
+    assert _zeile("gmx-test")["letzte_uid"] == 1
+    assert "RuntimeError" in caplog.text and "geheim" not in caplog.text
+    monkeypatch.undo()
+    assert post_unterhaltung.nachziehen()["zugeordnet"] == 1
+    assert _mails()[0]["unterhaltung"] is not None

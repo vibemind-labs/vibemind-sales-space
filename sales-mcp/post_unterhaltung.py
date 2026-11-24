@@ -10,11 +10,13 @@ geht nie zurueck. Kein Modellaufruf; im Protokoll nie Inhalte, Adressen oder Mes
 """
 from __future__ import annotations
 
+import logging
 import uuid
 
 import server
 
 GRENZE = 500
+LOG = logging.getLogger("sales-post")
 
 
 def zuordnen(conn, mail_id) -> str:
@@ -84,6 +86,7 @@ from (
              (b.richtung = 'eingang') desc, b.id
     limit 1) b
   where g2.richtung = 'gesendet'
+    and (g2.in_reply_to is not null or cardinality(g2.referenzen) > 0)
 ) x
 where g.id = x.gid
   and ((x.bereich is not null and g.bereich is distinct from x.bereich)
@@ -91,16 +94,27 @@ where g.id = x.gid
 """
 
 
-def nachziehen(grenze: int = GRENZE) -> dict:
+def nachziehen(grenze: int = GRENZE, stopp=None) -> dict:
     """Ordnet bis zu `grenze` Mails ohne Unterhaltung zu (neueste zuerst) und gleicht
-    gesendete Mails an ihre Bezugsmail an. Gibt {"zugeordnet": n, "geerbt": m} zurueck."""
+    gesendete Mails an ihre Bezugsmail an. Gibt {"zugeordnet": n, "geerbt": m, "fehler": k}
+    zurueck. `stopp`: Aufrufbare ohne Argumente (z. B. Event.is_set); ist sie wahr, endet
+    nur die Zuordnung, das Erbe laeuft immer. Eine Mail, deren Zuordnung scheitert, kostet
+    weder den Rest noch das Erbe; im Protokoll nur der Typ."""
     with server.pool.connection() as conn:
         ids = [z["id"] for z in conn.execute(
             "select id from post_mails where unterhaltung is null "
             "order by datum desc nulls last, id desc limit %s", (grenze,)).fetchall()]
+    zugeordnet = fehler = 0
     for mail_id in ids:
-        with server.pool.connection() as conn, conn.transaction():
-            zuordnen(conn, mail_id)
+        if stopp is not None and stopp():
+            break
+        try:
+            with server.pool.connection() as conn, conn.transaction():
+                zuordnen(conn, mail_id)
+            zugeordnet += 1
+        except Exception as e:  # noqa: BLE001 - eine Mail haelt die anderen nicht auf
+            fehler += 1
+            LOG.warning("Unterhaltung nicht zugeordnet (%s)", type(e).__name__)
     with server.pool.connection() as conn, conn.transaction():
         geerbt = conn.execute(_ERBE_SQL).rowcount
-    return {"zugeordnet": len(ids), "geerbt": geerbt}
+    return {"zugeordnet": zugeordnet, "geerbt": geerbt, "fehler": fehler}

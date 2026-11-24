@@ -458,6 +458,13 @@ create index if not exists post_mails_referenzen_idx
   on :"schema".post_mails using gin (referenzen);
 create index if not exists post_mails_unterhaltung_idx
   on :"schema".post_mails (besitzer, unterhaltung);
+-- Nachziehen je Runde (post_unterhaltung): Mails ohne Unterhaltung (fast leer) und
+-- gesendete Mails mit Bezug, beide ohne Gesamtdurchlauf. Praedikate wie in der Abfrage.
+create index if not exists post_mails_ohne_unterhaltung_idx
+  on :"schema".post_mails (datum desc nulls last, id desc) where unterhaltung is null;
+create index if not exists post_mails_gesendet_bezug_idx
+  on :"schema".post_mails (besitzer)
+  where richtung = 'gesendet' and (in_reply_to is not null or cardinality(referenzen) > 0);
 
 -- Stand des Gesendet-Ordners je Konto (der INBOX-Stand bleibt in post_konten).
 create table if not exists :"schema".post_ordner_stand (
