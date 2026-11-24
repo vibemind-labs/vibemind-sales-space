@@ -59,6 +59,7 @@ import post_imap
 import post_konten
 import post_ordnen
 import post_struktur
+import post_unterhaltung
 import post_werbung
 import post_ziel
 import postfach
@@ -340,6 +341,17 @@ def _ersatz_wiederfinden(conn, zeile: dict, mail: dict, richtung: str = "eingang
         (zeile["id"], richtung, mail["von"], mail["betreff"], mail["datum"])).fetchone()
 
 
+def _unterhaltung_zuordnen(conn, mail_id) -> None:
+    """Die neue Mail in ihre Unterhaltung haengen, in der Transaktion des Speicherns.
+    Savepoint: scheitert nur die Zuordnung, bleibt die Mail samt Stand erhalten und
+    `nachziehen` holt sie spaeter nach; im Protokoll nur der Typ."""
+    try:
+        with conn.transaction():
+            post_unterhaltung.zuordnen(conn, mail_id)
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("Unterhaltung nicht zugeordnet (%s)", type(e).__name__)
+
+
 def _speichern(zeile: dict, uid: int, mail: dict | None, richtung: str = "eingang") -> bool:
     """Eine Mail und der neue Stand `letzte_uid` in EINER Transaktion: bricht
     die Runde ab, ist weder eine Mail doppelt noch eine uebersprungen.
@@ -388,7 +400,7 @@ def _speichern(zeile: dict, uid: int, mail: dict | None, richtung: str = "eingan
                     status = "fehler" if fehler else "neu"
                     bereich = "privat" if fehler else None
                     fach = post_struktur.UNKLAR if fehler else None
-                neu = conn.execute(
+                eingefuegt = conn.execute(
                     "insert into post_mails (konto_id, imap_uid, message_id, besitzer, "
                     "von, an, betreff, datum, text, auszug, anhaenge, status, fehler, "
                     "bereich, fach, message_id_ersatz, kalenderteil, urspruengliche_adresse, "
@@ -403,7 +415,10 @@ def _speichern(zeile: dict, uid: int, mail: dict | None, richtung: str = "eingan
                      mail.get("in_reply_to"), mail.get("referenzen") or [],
                      # Nur eine wirklich zerlegte Mail: unlesbare bleiben fuer die Nachlese offen.
                      not fehler, richtung, zeile["ordner"] if gesendet else "INBOX", sensibel)
-                ).fetchone() is not None
+                ).fetchone()
+                neu = eingefuegt is not None
+                if neu:
+                    _unterhaltung_zuordnen(conn, eingefuegt["id"])
             elif str(vorhanden["konto_id"]) == str(zeile["id"]) and vorhanden["imap_uid"] < 0:
                 # Nach UIDVALIDITY-Wechsel wiedergefunden: neuer Fundort, keine
                 # Dublette. Ein Platzhalter traegt die UID im Namen - er zieht mit.
@@ -889,11 +904,22 @@ def eine_runde() -> dict:
                         type(e).__name__)
     if _STOPP.is_set():
         return bilanz
+    _unterhaltungen_nachziehen(bilanz)
     _einordnen(bilanz)
     _anweisungen_nachziehen(bilanz)
     if not _STOPP.is_set():
         _aufraeumen(bilanz)
     return bilanz
+
+
+def _unterhaltungen_nachziehen(bilanz: dict) -> None:
+    """Unterhaltungen verknuepfen und gesendete Mails an ihre Bezugsmail angleichen
+    (Bereich, Schutz). Ruft kein Modell, laeuft also auch in der Kundenpause; ein Fehler
+    kostet die Runde nicht, im Protokoll nur der Typ."""
+    try:
+        bilanz["unterhaltung"] = post_unterhaltung.nachziehen()
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("Unterhaltungen nicht nachgezogen (%s)", type(e).__name__)
 
 
 def _anweisungen_nachziehen(bilanz: dict) -> None:
@@ -1001,7 +1027,8 @@ def main(argv: list[str] | None = None) -> int:
             bilanz = eine_runde()
             if (bilanz.get("abgeholt") or bilanz.get("eingeordnet") or bilanz.get("konten_fehler")
                     or bilanz.get("ziele") or bilanz.get("gesendet")
-                    or bilanz.get("gesendet_fehler")):
+                    or bilanz.get("gesendet_fehler")
+                    or any((bilanz.get("unterhaltung") or {}).values())):
                 LOG.info("Runde: %s", bilanz)
         except Exception as e:  # noqa: BLE001 - Meldung koennte Mailinhalt zitieren
             LOG.error("Runde uebersprungen (%s)", type(e).__name__)
