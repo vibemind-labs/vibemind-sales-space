@@ -6,6 +6,7 @@ eingehende Post; die Suche findet beide Richtungen; der Agent sieht eine gesende
 Mail nur als Kopf; schreibende Routen und Bot-Werkzeuge lehnen gesendete Mails mit
 festem Text ab und aendern nichts. Nur gegen sales_test.
 """
+import inspect
 import json
 import os
 import sys
@@ -29,7 +30,9 @@ import post_herkunft  # noqa: E402
 import post_neu_einordnen  # noqa: E402
 import post_ordnen  # noqa: E402
 import post_struktur as ps  # noqa: E402
+import post_werbung  # noqa: E402
 import post_ziel  # noqa: E402
+import ui_post  # noqa: E402
 from gateway import GatewayTransient  # noqa: E402
 
 from starlette.testclient import TestClient  # noqa: E402
@@ -241,6 +244,34 @@ def test_eingang_filter_steht_in_jeder_eingangs_abfrage():
             assert FILTER in sql, name
     for b in (ps.BETREIBER_AGENT, ps.Betrachter(BESITZER, False, ())):
         assert "richtung" not in ps.sichtbar_sql(b)[0]
+
+
+# Abfragen, die im Funktionsrumpf stehen (keine Modulkonstante): derselbe Waechter ueber
+# den SQL-Text, hier der Quelltext der Funktion. Die Zahl ist die der Eingangs-Abfragen
+# darin - faellt einer der ausdruecklichen Filter weg, sinkt sie. Viele dieser Stellen
+# sind heute nur ueber den Status-CHECK sicher, das Verhalten allein faende es nicht.
+@pytest.mark.parametrize("modul, funktion, anzahl", [
+    (post_ziel, "_bleibt", 1),
+    (post_ziel, "ziel_frisch", 1),
+    (post_ziel, "ziele_aktualisieren", 2),          # Lesen und Schreiben
+    (post_werbung, "bleibt_immer_absender", 1),
+    (post_werbung, "regel_vorschlagen", 1),
+    (post_neu_einordnen, "_unklar_laufend", 1),
+    (post_freigabe, "jahre", 1),
+    (post_freigabe, "offene_mails", 1),
+    (post_abholen, "einordnen_offene", 2),          # neu und nachpruefen
+    (post_abholen, "modellaufrufe_heute", 4),       # vier Kostenarten
+    (post_anweisung, "entscheiden", 1),
+    (server, "_post_uid_aufloesen", 1),
+    (server, "_sammelstelle_leer", 1),
+    (post_erledigt, "erledigen", 1),
+    (post_erledigt, "wieder_oeffnen", 1),
+    (bewerbungs_eingang, "_mails", 1),
+    (ui_post, "routen", 3),                         # faecher_zahlen, konten_sichtbar, kontostand
+])
+def test_eingang_filter_in_funktionsrumpf(modul, funktion, anzahl):
+    quelle = inspect.getsource(getattr(modul, funktion))
+    assert quelle.count(FILTER) == anzahl, f"{modul.__name__}.{funktion}"
 
 
 # --- Schreibende Routen ----------------------------------------------------------
