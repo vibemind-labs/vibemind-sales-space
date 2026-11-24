@@ -343,15 +343,28 @@ def _ersatz_wiederfinden(conn, zeile: dict, mail: dict, richtung: str = "eingang
         (zeile["id"], richtung, mail["von"], mail["betreff"], mail["datum"])).fetchone()
 
 
-def _unterhaltung_zuordnen(conn, mail_id) -> None:
+def _unterhaltung_zuordnen(conn, mail_id) -> bool:
     """Die neue Mail in ihre Unterhaltung haengen, in der Transaktion des Speicherns.
     Savepoint: scheitert nur die Zuordnung, bleibt die Mail samt Stand erhalten und
-    `nachziehen` holt sie spaeter nach; im Protokoll nur der Typ."""
+    `nachziehen` holt sie spaeter nach; im Protokoll nur der Typ. True = zugeordnet."""
     try:
         with conn.transaction():
             post_unterhaltung.zuordnen(conn, mail_id)
+        return True
     except Exception as e:  # noqa: BLE001
         LOG.warning("Unterhaltung nicht zugeordnet (%s)", type(e).__name__)
+        return False
+
+
+def _gleich_erben(conn, mail_id) -> None:
+    """M1: eine eben gespeicherte gesendete Mail erbt sofort Bereich und Schutz ihrer
+    Bezugsmail bzw. ihres Zwillings, nicht erst am Rundenende. Savepoint: scheitert nur
+    das Erbe, bleibt die Mail; `nachziehen` holt es nach. Im Protokoll nur der Typ."""
+    try:
+        with conn.transaction():
+            post_unterhaltung.erben(conn, mail_id)
+    except Exception as e:  # noqa: BLE001
+        LOG.warning("Erbe nicht angewendet (%s)", type(e).__name__)
 
 
 def _speichern(zeile: dict, uid: int, mail: dict | None, richtung: str = "eingang") -> bool:
@@ -419,8 +432,8 @@ def _speichern(zeile: dict, uid: int, mail: dict | None, richtung: str = "eingan
                      not fehler, richtung, zeile["ordner"] if gesendet else "INBOX", sensibel)
                 ).fetchone()
                 neu = eingefuegt is not None
-                if neu:
-                    _unterhaltung_zuordnen(conn, eingefuegt["id"])
+                if neu and _unterhaltung_zuordnen(conn, eingefuegt["id"]) and gesendet:
+                    _gleich_erben(conn, eingefuegt["id"])
             elif str(vorhanden["konto_id"]) == str(zeile["id"]) and vorhanden["imap_uid"] < 0:
                 # Nach UIDVALIDITY-Wechsel wiedergefunden: neuer Fundort, keine
                 # Dublette. Ein Platzhalter traegt die UID im Namen - er zieht mit.
@@ -592,13 +605,24 @@ def koepfe_nachlesen(zeile: dict, kasten, stapel: int = KOPF_STAPEL,
     Rueckgabe = markierte Zeilen."""
     fehler = fehler if fehler is not None else {}
     fehler.setdefault("n", 0)
+    # M4: keine Transaktion bleibt ueber IMAP-Gespraeche offen. Erst lesen und die
+    # Verbindung zurueckgeben, dann mit dem Server sprechen, dann schreiben.
     with server.pool.connection() as conn:
         zeilen = _kopf_zeilen(conn, zeile, True, stapel)
-        if any(z["ordner"] == "INBOX" for z in zeilen):
-            inbox_ok = True
-            try:
-                post_imap.lesend_waehlen(kasten, "INBOX")
-                aktuell = _uidvalidity(kasten)
+    if any(z["ordner"] == "INBOX" for z in zeilen):
+        inbox_ok = True
+        try:
+            post_imap.lesend_waehlen(kasten, "INBOX")
+            aktuell = _uidvalidity(kasten)
+        except (imaplib.IMAP4.abort, OSError):
+            raise
+        except Exception as e:  # noqa: BLE001 - INBOX kostet nicht die anderen Ordner
+            inbox_ok = False
+            fehler["n"] += 1
+            LOG.warning("Konto %s: INBOX fuer Antwortkoepfe nicht waehlbar (%s)",
+                        zeile["kennung"], type(e).__name__)
+        with server.pool.connection() as conn:
+            if inbox_ok:
                 # Frisch lesen: konto_abholen kann den Wert in dieser Runde erneuert haben.
                 gespeichert = conn.execute("select uidvalidity from post_konten where id = %s",
                                            (zeile["id"],)).fetchone()
@@ -608,13 +632,6 @@ def koepfe_nachlesen(zeile: dict, kasten, stapel: int = KOPF_STAPEL,
                     LOG.info("Konto %s: %d INBOX-Zeilen uebersprungen (uidvalidity)",
                              zeile["kennung"],
                              sum(1 for z in zeilen if z["ordner"] == "INBOX"))
-            except (imaplib.IMAP4.abort, OSError):
-                raise
-            except Exception as e:  # noqa: BLE001 - INBOX kostet nicht die anderen Ordner
-                inbox_ok = False
-                fehler["n"] += 1
-                LOG.warning("Konto %s: INBOX fuer Antwortkoepfe nicht waehlbar (%s)",
-                            zeile["kennung"], type(e).__name__)
             if not inbox_ok:
                 zeilen = _kopf_zeilen(conn, zeile, False, stapel)
     if not zeilen:
@@ -623,24 +640,24 @@ def koepfe_nachlesen(zeile: dict, kasten, stapel: int = KOPF_STAPEL,
     for z in zeilen:
         je_ordner.setdefault(_kopf_ort(z)[0], []).append(z)
     markiert = 0
-    with server.pool.connection() as conn:
-        for ordner, gruppe in je_ordner.items():
-            uids = [u for u in (_kopf_ort(z)[1] for z in gruppe) if u is not None and u > 0]
-            try:
-                gelesen = post_imap.antwortkoepfe_lesen(kasten, ordner, uids)
-            except post_imap.Fehlt:
-                gelesen = {}          # Ordner gibt es nicht mehr: die Mail ist nicht zu finden
-            except (imaplib.IMAP4.abort, OSError) as e:
-                # Die Verbindung ist hin: Rest der Runde aufgeben, Zeilen bleiben offen.
-                fehler["n"] += 1
-                LOG.warning("Konto %s: Verbindung beim Nachlesen verloren (%s)",
-                            zeile["kennung"], type(e).__name__)
-                break
-            except Exception as e:  # noqa: BLE001 - ein Ordner haelt die anderen nicht auf
-                fehler["n"] += 1
-                LOG.warning("Konto %s: Antwortkoepfe eines Ordners nicht gelesen (%s)",
-                            zeile["kennung"], type(e).__name__)
-                continue
+    for ordner, gruppe in je_ordner.items():
+        uids = [u for u in (_kopf_ort(z)[1] for z in gruppe) if u is not None and u > 0]
+        try:
+            gelesen = post_imap.antwortkoepfe_lesen(kasten, ordner, uids)
+        except post_imap.Fehlt:
+            gelesen = {}          # Ordner gibt es nicht mehr: die Mail ist nicht zu finden
+        except (imaplib.IMAP4.abort, OSError) as e:
+            # Die Verbindung ist hin: Rest der Runde aufgeben, Zeilen bleiben offen.
+            fehler["n"] += 1
+            LOG.warning("Konto %s: Verbindung beim Nachlesen verloren (%s)",
+                        zeile["kennung"], type(e).__name__)
+            break
+        except Exception as e:  # noqa: BLE001 - ein Ordner haelt die anderen nicht auf
+            fehler["n"] += 1
+            LOG.warning("Konto %s: Antwortkoepfe eines Ordners nicht gelesen (%s)",
+                        zeile["kennung"], type(e).__name__)
+            continue
+        with server.pool.connection() as conn:
             for z in gruppe:
                 uid = _kopf_ort(z)[1]
                 if _kopf_eintragen(conn, z, gelesen.get(uid) if uid is not None else None):
@@ -1161,6 +1178,7 @@ def main(argv: list[str] | None = None) -> int:
             if (bilanz.get("abgeholt") or bilanz.get("eingeordnet") or bilanz.get("konten_fehler")
                     or bilanz.get("ziele") or bilanz.get("gesendet")
                     or bilanz.get("gesendet_fehler")
+                    or bilanz.get("koepfe") or bilanz.get("koepfe_fehler")
                     or any((bilanz.get("unterhaltung") or {}).values())):
                 LOG.info("Runde: %s", bilanz)
         except Exception as e:  # noqa: BLE001 - Meldung koennte Mailinhalt zitieren

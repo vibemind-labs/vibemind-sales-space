@@ -90,6 +90,17 @@ def _adresse(link_basis: str, **werte) -> str:
     return link_basis + ("?" + urllib.parse.urlencode(teile) if teile else "")
 
 
+def gesendet_marke(m: dict) -> str:
+    """Das Etikett „Gesendet“ fuer eine gesendete Mail (mit fuehrendem Leerzeichen),
+    sonst "". Ein Baustein fuer /post, die Mailansicht, die Unterhaltung und die
+    globale Suche (ui.py)."""
+    return ' <span class="badge">Gesendet</span>' if _ist_gesendet(m) else ""
+
+
+def _ist_gesendet(m: dict) -> bool:
+    return m.get("richtung") == "gesendet"
+
+
 def knopf_formular(ui, mail_id, pfad: str, text: str, art: str = "",
                    zurueck: str = "") -> str:
     """Ein Ein-Knopf-Formular fuer die Erledigt-Routen (auch vom Posteingang
@@ -257,13 +268,16 @@ def routen(ui) -> list:
     def mail_zeile(m: dict, konten: dict, ansicht: str = "") -> str:
         marke = (' <span class="badge achtung">sensibel</span>'
                  if m["sensibel"] is not False else "")
-        if m.get("richtung") == "gesendet":
-            marke += ' <span class="badge">Gesendet</span>'
+        marke += gesendet_marke(m)
         if m.get("dringlichkeit") in ("sofort", "heute"):
             marke += (f' <span class="badge achtung">{e(m["dringlichkeit"])}</span>')
-        fach = (f'{e(BEREICH_TITEL.get(m["bereich"], m["bereich"]))} · {e(m["fach"])}'
-                + (f' · {e(m["unterfach"])}' if m["unterfach"] else "")
-                if m["bereich"] else "noch nicht eingeordnet")
+        if _ist_gesendet(m):
+            # M7: gesendete Mails haben kein Fach - statt eines leeren Fachs „Gesendet“.
+            fach = e(einordnung_text(m["bereich"], "Gesendet", None))
+        else:
+            fach = (f'{e(BEREICH_TITEL.get(m["bereich"], m["bereich"]))} · {e(m["fach"])}'
+                    + (f' · {e(m["unterfach"])}' if m["unterfach"] else "")
+                    if m["bereich"] else "noch nicht eingeordnet")
         return (f'<a class="mailzeile" href="/post/mail/{e(m["id"])}">'
                 f'<b>{e(m["betreff"] or "(ohne Betreff)")}</b>{marke}'
                 f'<div class="meta">{e(m["von"])} · {e(ui._zeit(m["datum"]) if m["datum"] else "")}'
@@ -453,9 +467,8 @@ def routen(ui) -> list:
             return ""
         zeilen = []
         for u in eintraege:
-            gesendet = u.get("richtung") == "gesendet"
             aktuell = str(u["id"]) == str(m["id"])
-            marke = ' <span class="badge">Gesendet</span>' if gesendet else ""
+            marke = gesendet_marke(u)
             if aktuell:
                 marke += ' <span class="meta">(diese Mail)</span>'
             auszug = (f'<div class="meta">{e((u.get("auszug") or "")[:200])}</div>'
@@ -593,14 +606,15 @@ def routen(ui) -> list:
         sensibel = m["sensibel"] is not False
         kopf = [("Konto", konto[0]["kennung"] if konto else ""),
                 ("Von", m["von"]), ("Datum", ui._zeit(m["datum"]) if m["datum"] else ""),
-                ("Einordnung", (einordnung_text(m["bereich"], m["fach"], m["unterfach"])
+                ("Einordnung", (einordnung_text(m["bereich"], "Gesendet", None)
+                                if _ist_gesendet(m) else
+                                einordnung_text(m["bereich"], m["fach"], m["unterfach"])
                                 if m["bereich"] else "noch nicht eingeordnet"))]
         if not sensibel and m["an"]:
             kopf.insert(2, ("An", m["an"]))
         teile = [_STIL, '<p><a href="/post">← Alle Mails</a></p>',
                  f'<div class="karte"><h2>{e(m["betreff"] or "(ohne Betreff)")}'
-                 + (' <span class="badge">Gesendet</span>'
-                    if m.get("richtung") == "gesendet" else "") + '</h2>',
+                 + gesendet_marke(m) + '</h2>',
                  "".join(f'<div class="meta"><b>{e(k)}:</b> {e(v)}</div>' for k, v in kopf)]
         if sensibel:
             # Spec §5: von sensiblen Mails bleiben nur Kopfdaten; Text und

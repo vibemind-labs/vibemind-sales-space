@@ -261,6 +261,7 @@ def test_eingang_filter_steht_in_jeder_eingangs_abfrage():
     (post_freigabe, "offene_mails", 1),
     (post_abholen, "einordnen_offene", 2),          # neu und nachpruefen
     (post_abholen, "modellaufrufe_heute", 4),       # vier Kostenarten
+    (post_abholen, "_kopf_zeilen", 1),
     (post_anweisung, "entscheiden", 1),
     (server, "_post_uid_aufloesen", 1),
     (server, "_sammelstelle_leer", 1),
@@ -326,11 +327,15 @@ def test_agent_liste_ohne_gesendete_suche_nur_kopf(welt):
     assert set(mails) == {f"post:{welt['eingang']}", f"post:{welt['gesendet']}"}
     g = mails[f"post:{welt['gesendet']}"]
     assert g["von"] == EIGENE_ADRESSE and g["betreff"] == "Re: Projektplan Frage"
-    assert g["hinweis"] == server.AGENT_HINWEIS["nicht_geprueft"]
+    # M5: der Treffer sagt, dass er gesendet ist und sich nicht beantworten laesst.
+    assert g["richtung"] == "gesendet"
+    assert g["hinweis"] == server.AGENT_HINWEIS["gesendet"]
+    assert "gesendet" in g["hinweis"] and "nicht beantworten" in g["hinweis"]
     assert g["auszug"] is None and g["dringlichkeit"] is None and g["kalenderteil"] is False
     assert "Entwurfstext" not in json.dumps(such, ensure_ascii=False)
     # Kontrolle: die eingehende, gepruefte Mail ist lesbar.
     assert "hinweis" not in mails[f"post:{welt['eingang']}"]
+    assert mails[f"post:{welt['eingang']}"]["richtung"] == "eingang"
 
     einzeln = json.loads(server.postfach_mail_lesen(f"post:{welt['gesendet']}"))
     assert einzeln["text"] is None and einzeln["an"] is None and einzeln["anhaenge"] == []

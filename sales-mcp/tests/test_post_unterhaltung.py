@@ -297,6 +297,73 @@ def test_speichern_behaelt_mail_und_stand_wenn_zuordnen_scheitert(monkeypatch, c
     assert _mails()[0]["unterhaltung"] is not None
 
 
+
+# --- Fix-Welle: Mail an mich selbst (I2), Sperrschluessel (M10a) -----------------------
+
+def test_zwilling_teilt_unterhaltung_und_erbt_schutz():
+    _konto()
+    raus = _roh("gmx-test", "selbst@x", richtung="gesendet", bereich="business",
+                text="Notiz an mich")
+    eingang = _roh("gmx-test", "selbst@x", bereich="privat")
+    assert _unt(raus) is not None and _unt(raus) == _unt(eingang)
+    with server.pool.connection() as conn:
+        conn.execute("update post_mails set sensibel = true where id = %s", (eingang,))
+    post_unterhaltung.nachziehen()
+    z = _zeile_von(raus)
+    assert z["sensibel"] is True and z["bereich"] == "privat"
+    assert z["text"] is None and z["auszug"] is None and z["an"] is None
+    assert z["anhaenge"] == []
+    assert post_unterhaltung.nachziehen()["geerbt"] == 0
+
+
+def test_zwilling_nie_ueber_besitzer_oder_platzhalter():
+    _konto("felix", "felix-k")
+    _konto("ivan", "ivan-k")
+    felix = _roh("felix-k", "gleich@x", besitzer="felix", bereich="privat", sensibel=True)
+    ivan = _roh("ivan-k", "gleich@x", richtung="gesendet", besitzer="ivan",
+                bereich="business", text="Ivans Text")
+    e1 = _roh("felix-k", "felix-k:1@sales-post", ersatz=True, bereich="privat", sensibel=True)
+    e2 = _roh("felix-k", "felix-k:1@sales-post", richtung="gesendet", ersatz=True,
+              bereich="business", text="Platzhaltertext")
+    assert _unt(felix) != _unt(ivan) and _unt(e1) != _unt(e2)
+    assert post_unterhaltung.nachziehen()["geerbt"] == 0
+    for mid, text in ((ivan, "Ivans Text"), (e2, "Platzhaltertext")):
+        z = _zeile_von(mid)
+        assert z["sensibel"] is False and z["text"] == text and z["bereich"] == "business"
+
+
+def test_zwilling_vorrang_vor_referenz_beim_bereich_sensibel_aus_beiden():
+    _konto()
+    _roh("gmx-test", "r1@x", bereich="business")
+    _roh("gmx-test", "selbst@x", bereich="privat")
+    raus = _roh("gmx-test", "selbst@x", tage=1, richtung="gesendet", in_reply_to="r1@x",
+                bereich="business")
+    post_unterhaltung.nachziehen()
+    assert _zeile_von(raus)["bereich"] == "privat"
+    # Sensibel kommt aus jedem Bezug, auch wenn der Zwilling es nicht ist.
+    with server.pool.connection() as conn:
+        conn.execute("update post_mails set sensibel = true where message_id = 'r1@x'")
+    post_unterhaltung.nachziehen()
+    assert _zeile_von(raus)["sensibel"] is True
+
+
+def test_sperrschluessel_traegt_das_schema(monkeypatch):
+    _konto()
+    mail_id = _roh("gmx-test", "m1@x", zuordnen=False)
+    schluessel = []
+
+    class Mitschnitt:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, params=None):
+            if "pg_advisory_xact_lock" in sql:
+                schluessel.append(params[0])
+            return self._conn.execute(sql, params)
+    with server.pool.connection() as conn, conn.transaction():
+        post_unterhaltung.zuordnen(Mitschnitt(conn), mail_id)
+    assert schluessel == [f"post_unterhaltung:{server.SCHEMA}:felix"]
+
 # --- Task 7: Unterhaltung lesen ---------------------------------------------
 
 def _felix():

@@ -4257,6 +4257,10 @@ AGENT_HINWEIS = {
     "nicht_geprueft": "Noch nicht geprüft – nur Absender und Betreff.",
     "anweisung": ("Enthält eine Anweisung an eine KI – gesperrt, bis der "
                   "Besitzer sie freigibt. Nur Absender und Betreff."),
+    # M5: ein Suchtreffer aus dem Gesendet-Ordner - sonst saehe er aus wie eine
+    # eingehende Mail von Felix, und der Agent versuchte mail_beantworten.
+    "gesendet": ("Vom Besitzer gesendete Mail – lässt sich nicht beantworten "
+                 "oder einstufen. Nur Absender und Betreff."),
 }
 
 
@@ -4320,7 +4324,12 @@ def _sammelstelle_lesen(anzahl: int, wahl: str, suche: str) -> str:
         # die Mail oeffnet; das Feld zeigt, welche das sind.
         "kalenderteil": bool(z.get("kalenderteil")),
         "dringlichkeit": _agent_dringlichkeit(z),
+        "richtung": z.get("richtung"),
         **_agent_hinweis(z),
+        # Gesendete Treffer sind ohnehin nur Kopf (AGENT_LESBAR_SQL); der Hinweis sagt
+        # dazu, dass sie gesendet sind und sich nicht beantworten lassen.
+        **({"hinweis": AGENT_HINWEIS["gesendet"]}
+           if z.get("richtung") == "gesendet" else {}),
     } for z in zeilen]
     return _json({"anzahl": len(mails), "mails": mails})
 

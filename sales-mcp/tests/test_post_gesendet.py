@@ -23,13 +23,15 @@ ORDNER = "Gesendet"
 
 def _raus(message_id="<g1@x>", an="Anna Beispiel <anna@example.org>", betreff="Angebot",
           text="Hallo Anna, anbei das Angebot.", datum="Mon, 02 Nov 2026 11:00:00 +0100",
-          cc=None) -> bytes:
+          cc=None, in_reply_to=None) -> bytes:
     m = EmailMessage()
     m["From"] = "gmx-test@gmx.de"
     m["To"] = an
     m["Subject"] = betreff
     if cc:
         m["Cc"] = cc
+    if in_reply_to:
+        m["In-Reply-To"] = in_reply_to
     m["Date"] = datum
     m["Message-ID"] = message_id
     m.set_content(text)
@@ -507,3 +509,121 @@ def test_message_id_vergleich_ignoriert_klammern_und_leerraum():
     kasten.kopf_roh[7] = "Message-ID:  <ABC@x> \r\nIn-Reply-To: <s@x>\r\n"
     assert post_abholen.koepfe_nachlesen(_zeile("gmx-test"), kasten) == 1
     assert _zeile_id(alt)["in_reply_to"] == "s@x"
+
+
+# --- Fix-Welle nach dem Gesamt-Review ----------------------------------------------
+
+def test_mail_an_mich_selbst_eine_unterhaltung_und_schutz():
+    """I2: der gesendete Zwilling haengt in derselben Unterhaltung und erbt den Schutz."""
+    import post_unterhaltung
+    _konto()
+    with server.pool.connection() as conn:
+        conn.execute("update post_konten set standard_bereich = 'business'")
+    selbst = _raus("<selbst@x>", an="gmx-test@gmx.de", betreff="Notiz",
+                   text="Meine Ausweisnummer")
+    kasten = Attrappe({1: selbst}, ordner={ORDNER: {1: selbst}}, sent=ORDNER)
+    assert post_abholen.konto_abholen(_zeile("gmx-test"), kasten) == 1
+    assert post_abholen.gesendet_abholen(_zeile("gmx-test"), kasten) == 1
+    eingang = _mails("richtung = 'eingang'")[0]
+    raus = _gesendet_mails()[0]
+    assert eingang["unterhaltung"] is not None
+    assert raus["unterhaltung"] == eingang["unterhaltung"]
+    assert raus["sensibel"] is False and raus["text"]
+    # Das Modell stuft den Eingang als sensibel ein (Inhalt wird dabei geleert).
+    with server.pool.connection() as conn:
+        conn.execute("update post_mails set sensibel = true, bereich = 'privat', text = null, "
+                     "auszug = null, an = null, anhaenge = '{}' where id = %s", (eingang["id"],))
+        conn.execute("update post_mails set urspruengliche_adresse = 'x@example.org', "
+                     "anhaenge = '{x.pdf}' where id = %s", (raus["id"],))
+    post_unterhaltung.nachziehen()
+    z = _zeile_id(raus["id"])
+    assert z["sensibel"] is True and z["bereich"] == "privat"
+    assert z["text"] is None and z["auszug"] is None and z["an"] is None
+    assert z["anhaenge"] == [] and z["urspruengliche_adresse"] is None
+    assert z["unterhaltung"] == eingang["unterhaltung"]
+
+
+def test_antwort_auf_sensible_mail_sofort_beim_speichern_sensibel():
+    """M1: das Erbe gilt schon beim Speichern, nicht erst beim Nachziehen."""
+    konto = _konto()
+    with server.pool.connection() as conn:
+        conn.execute("update post_konten set standard_bereich = 'business'")
+    bezug = _alt(konto, 9, "m1@x")
+    with server.pool.connection() as conn:
+        conn.execute("update post_mails set sensibel = true where id = %s", (bezug,))
+    kasten = Attrappe({}, ordner={ORDNER: {1: _raus("<g1@x>", in_reply_to="<m1@x>")}},
+                      sent=ORDNER)
+    assert post_abholen.gesendet_abholen(_zeile("gmx-test"), kasten) == 1
+    z = _gesendet_mails()[0]
+    assert z["unterhaltung"] is not None and z["unterhaltung"] == _zeile_id(bezug)["unterhaltung"]
+    assert z["sensibel"] is True and z["bereich"] == "privat"
+    assert z["text"] is None and z["auszug"] is None and z["an"] is None
+    assert z["anhaenge"] == [] and z["urspruengliche_adresse"] is None
+
+
+def test_antwort_ohne_sensiblen_bezug_bleibt_lesbar():
+    """M1, Gegenprobe: ohne sensiblen Bezug bleibt die Antwort, wie sie ist."""
+    konto = _konto()
+    _alt(konto, 9, "m1@x")
+    kasten = Attrappe({}, ordner={ORDNER: {1: _raus("<g1@x>", in_reply_to="<m1@x>")}},
+                      sent=ORDNER)
+    post_abholen.gesendet_abholen(_zeile("gmx-test"), kasten)
+    z = _gesendet_mails()[0]
+    assert z["sensibel"] is False and z["text"] and z["bereich"] == "privat"
+
+
+@pytest.mark.parametrize("bilanz, gemeldet", [
+    ({"koepfe": 3}, True),
+    ({"koepfe_fehler": 1}, True),
+    ({"koepfe": 0, "koepfe_fehler": 0}, False),
+])
+def test_runde_meldet_koepfe(monkeypatch, caplog, bilanz, gemeldet):
+    """M3: eine Runde nur mit Kopf-Nachlese (oder ihren Fehlern) steht im Protokoll."""
+    import logging
+    monkeypatch.setattr(post_abholen, "POST_BESITZER", "felix")
+    monkeypatch.setattr(post_abholen, "POST_ONCE", True)
+    monkeypatch.setattr(post_abholen, "_logging_einrichten", lambda: None)
+    monkeypatch.setattr(post_abholen.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(post_abholen.socket, "setdefaulttimeout", lambda t: None)
+    monkeypatch.setattr(post_abholen.post_konten, "env_konten_uebernehmen", lambda b: 0)
+    monkeypatch.setattr(post_abholen, "eine_runde", lambda: dict(bilanz))
+    monkeypatch.setattr(post_abholen.LOG, "propagate", True)
+    with caplog.at_level(logging.INFO, logger="sales-post"):
+        assert post_abholen.main([]) == 0
+    assert ("Runde:" in caplog.text) is gemeldet
+
+
+def test_koepfe_keine_offene_transaktion_waehrend_imap(monkeypatch):
+    """M4: waehrend des IMAP-Gespraechs haelt keine Verbindung eine Transaktion offen."""
+    import contextlib
+    import psycopg
+    konto = _konto()
+    inbox = _alt(konto, 7, "m7@x")
+    moved = _alt(konto, 8, "m8@x", ordner="Zur Info", ordner_uid=2)
+    kasten = Attrappe({7: _antwort("<m7@x>", in_reply_to="<s1@x>")},
+                      ordner={"Zur Info": {2: _antwort("<m8@x>", in_reply_to="<s2@x>")}})
+    zeile = _zeile("gmx-test")
+    ausgegeben = []
+    echt_verbindung = server.pool.connection
+
+    @contextlib.contextmanager
+    def merken(*a, **k):
+        with echt_verbindung(*a, **k) as conn:
+            ausgegeben.append(conn)
+            yield conn
+    monkeypatch.setattr(server.pool, "connection", merken)
+    zustaende = []
+
+    def belauschen(name):
+        echt = getattr(post_abholen.post_imap, name)
+
+        def spion(*a, **k):
+            zustaende.append({c.info.transaction_status for c in ausgegeben if not c.closed})
+            return echt(*a, **k)
+        monkeypatch.setattr(post_abholen.post_imap, name, spion)
+    belauschen("lesend_waehlen")
+    belauschen("antwortkoepfe_lesen")
+    assert post_abholen.koepfe_nachlesen(zeile, kasten) == 2
+    assert zustaende and all(s <= {psycopg.pq.TransactionStatus.IDLE} for s in zustaende)
+    assert _zeile_id(inbox)["in_reply_to"] == "s1@x"
+    assert _zeile_id(moved)["in_reply_to"] == "s2@x"

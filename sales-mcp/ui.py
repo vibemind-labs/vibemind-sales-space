@@ -9016,7 +9016,8 @@ def _posteingang_suche(such: str, betrachter_name: str | None = None) -> str:
             teile.append(
                 f'<div class="karte">{_badge("email")} '
                 f'<b><a href="/post/mail/{_e(m["id"])}">'
-                f'{_e(m.get("betreff") or "(ohne Betreff)")}</a></b> · '
+                f'{_e(m.get("betreff") or "(ohne Betreff)")}</a></b>'
+                f'{ui_post.gesendet_marke(m)} · '
                 f'<span class="meta">{_e(m.get("von") or "")} · '
                 f'{_zeit(m["datum"])}</span></div>')
         if not treffer:

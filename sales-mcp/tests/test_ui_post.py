@@ -1149,3 +1149,44 @@ def test_suche_findet_gesendete_in_jedem_reiter_und_keine_geloeschten():
         assert "Quokkaplan geloescht" not in r.text
     # Ohne Suchwort keine gesendeten Mails in der Liste.
     assert "Quokkaplan gesendet" not in _get("t8_anna", "/post").text
+
+
+# --- Fix-Welle nach dem Gesamt-Review: Gesendet-Etikett ueberall (M6, M7, M8) ----------
+
+GESENDET_ETIKETT = '<span class="badge">Gesendet</span>'
+
+
+def _ohne_fach(mail_id):
+    server._q("update post_mails set fach = null where id = %s returning id", (mail_id,))
+
+
+def test_gesendet_etikett_ein_baustein():
+    import ui_post
+    assert ui_post.gesendet_marke({"richtung": "gesendet"}) == " " + GESENDET_ETIKETT
+    assert ui_post.gesendet_marke({"richtung": "eingang"}) == ""
+    assert ui_post.gesendet_marke({}) == ""
+
+
+def test_globale_suche_zeigt_gesendet_etikett(eingang):
+    raus = _gesendet(betreff="Wombatplan raus", text="Wombatplan")
+    rein = _mail(betreff="Wombatplan rein", text="Wombatplan")
+    html = ui._posteingang_suche("Wombatplan", "t8_anna")
+    assert "Wombatplan raus" in html and "Wombatplan rein" in html
+    karten = {m: k for k in html.split('<div class="karte">') for m in (raus, rein)
+              if f"/post/mail/{m}" in k}
+    assert GESENDET_ETIKETT in karten[raus]
+    assert GESENDET_ETIKETT not in karten[rein]
+
+
+def test_gesendete_zeile_und_ansicht_ohne_leeres_fach():
+    raus = _gesendet(betreff="Re: Kranichplan", text="Kranichplan")
+    _ohne_fach(raus)
+    liste = _get("t8_anna", "/post?q=Kranichplan").text
+    zeile = next(z for z in liste.split('<a class="mailzeile"') if f"/post/mail/{raus}" in z)
+    assert "Business · Gesendet" in zeile and "Business · <" not in zeile
+    ansicht = _get("t8_anna", f"/post/mail/{raus}").text
+    assert "<b>Einordnung:</b> Business · Gesendet" in ansicht
+    # Gegenprobe: eine eingehende Mail zeigt weiter ihr Fach.
+    rein = _mail(betreff="Kranichplan rein", text="Kranichplan")
+    assert "<b>Einordnung:</b> Business · Kunden &amp; Anfragen" in _get(
+        "t8_anna", f"/post/mail/{rein}").text

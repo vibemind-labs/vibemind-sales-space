@@ -5,7 +5,8 @@ Unterhaltung (`unterhaltung`, uuid) verknuepft - nie ueber Besitzer hinweg, und 
 eine Ersatz-Kennung (`message_id_ersatz`: ein Platzhalter beweist keine Identitaet).
 
 Eine gesendete Antwort erbt vom beantworteten Eingang den Bereich und den Schutz: ist die
-Bezugsmail sensibel, wird es die Antwort auch (und ihr Inhalt wird geleert). `sensibel`
+Bezugsmail sensibel, wird es die Antwort auch (und ihr Inhalt wird geleert). Ebenso erbt
+die gesendete Kopie einer Mail an mich selbst von ihrem Eingangs-Zwilling. `sensibel`
 geht nie zurueck. Kein Modellaufruf; im Protokoll nie Inhalte, Adressen oder Message-IDs.
 """
 from __future__ import annotations
@@ -33,14 +34,20 @@ def zuordnen(conn, mail_id) -> str:
     besitzer = mail["besitzer"]
     # Ein Fetcher-Prozess ist der Normalfall; die Sperre haelt auch zwei Zuordnungen
     # desselben Besitzers auseinander (faellt mit dem Transaktionsende).
-    conn.execute("select pg_advisory_xact_lock(hashtext(%s))", ("post_unterhaltung:" + besitzer,))
+    # Mit Schema im Schluessel: derselbe Besitzername in zwei Laeden sperrt sich nicht.
+    conn.execute("select pg_advisory_xact_lock(hashtext(%s))",
+                 (f"post_unterhaltung:{server.SCHEMA}:{besitzer}",))
     bezug = [k for k in [mail["in_reply_to"], *(mail["referenzen"] or [])] if k]
+    # Nachbarn: die Mails, auf die sie sich bezieht; die Mails, die sich auf sie beziehen;
+    # und ihr Zwilling mit derselben Message-ID (eine Mail an mich selbst liegt als
+    # Eingang UND als gesendet vor). Platzhalter verbinden in keiner Richtung.
     nachbarn = conn.execute(
         "select id, unterhaltung from post_mails where besitzer = %s and id <> %s and ("
         "(not message_id_ersatz and message_id = any(%s)) "
-        "or (not %s and (in_reply_to = %s or referenzen @> array[%s]::text[])))",
+        "or (not %s and (in_reply_to = %s or referenzen @> array[%s]::text[] "
+        "               or (not message_id_ersatz and message_id = %s))))",
         (besitzer, mail["id"], bezug, mail["message_id_ersatz"], mail["message_id"],
-         mail["message_id"])).fetchall()
+         mail["message_id"], mail["message_id"])).fetchall()
     kennungen = {n["unterhaltung"] for n in nachbarn if n["unterhaltung"] is not None}
     if mail["unterhaltung"] is not None:
         kennungen.add(mail["unterhaltung"])
@@ -64,6 +71,10 @@ def zuordnen(conn, mail_id) -> str:
 # Die Bezugsmail einer gesendeten Mail: In-Reply-To, sonst die letzte vorhandene aus
 # References; beim selben Besitzer, nie ueber einen Platzhalter. Bei mehreren Zeilen mit
 # derselben Message-ID gewinnt der Eingang, dann die kleinste id.
+# Dazu der Zwilling (I2): dieselbe Mail als Eingang (Mail an mich selbst), gleicher
+# Besitzer, beide ohne Platzhalter. Sein Bereich geht vor (wenn gesetzt); sensibel wird
+# die gesendete Mail, wenn der Zwilling ODER die Bezugsmail es ist.
+# `%(gid)s`: NULL = alle gesendeten Mails (nachziehen), sonst nur diese eine (Speichern).
 _ERBE_SQL = """
 update post_mails g set
   bereich = coalesce(x.bereich, g.bereich),
@@ -75,23 +86,40 @@ update post_mails g set
                                 then null else g.urspruengliche_adresse end,
   anhaenge = case when g.sensibel or x.sensibel then '{}'::text[] else g.anhaenge end
 from (
-  select g2.id as gid, b.bereich, b.sensibel
+  select g2.id as gid, coalesce(t.bereich, b.bereich) as bereich,
+         coalesce(t.sensibel, false) or coalesce(b.sensibel, false) as sensibel
   from post_mails g2
-  cross join lateral (
+  left join lateral (
+    select t.bereich, t.sensibel from post_mails t
+    where t.besitzer = g2.besitzer and t.id <> g2.id and t.richtung = 'eingang'
+      and not t.message_id_ersatz and not g2.message_id_ersatz
+      and t.message_id = g2.message_id
+    order by t.sensibel desc, (t.bereich is null), t.id
+    limit 1) t on true
+  left join lateral (
     select b.bereich, b.sensibel from post_mails b
-    where b.besitzer = g2.besitzer and b.id <> g2.id and not b.message_id_ersatz
+    where (g2.in_reply_to is not null or cardinality(g2.referenzen) > 0)
+      and b.besitzer = g2.besitzer and b.id <> g2.id and not b.message_id_ersatz
       and (b.message_id = g2.in_reply_to or b.message_id = any(g2.referenzen))
     order by (b.message_id = g2.in_reply_to) desc,
              array_position(g2.referenzen, b.message_id) desc nulls last,
              (b.richtung = 'eingang') desc, b.id
-    limit 1) b
+    limit 1) b on true
   where g2.richtung = 'gesendet'
-    and (g2.in_reply_to is not null or cardinality(g2.referenzen) > 0)
+    and (%(gid)s::uuid is null or g2.id = %(gid)s::uuid)
+    and (t.sensibel is not null or b.sensibel is not null)
 ) x
 where g.id = x.gid
   and ((x.bereich is not null and g.bereich is distinct from x.bereich)
        or (x.sensibel and not g.sensibel))
 """
+
+
+def erben(conn, mail_id=None) -> int:
+    """Gleicht gesendete Mails an Bezugsmail und Zwilling an (Bereich, sensibel) und gibt
+    die Zahl der geaenderten Zeilen zurueck. `mail_id`: nur diese eine Mail (beim
+    Speichern), sonst alle. Laeuft in der Transaktion des Aufrufers."""
+    return conn.execute(_ERBE_SQL, {"gid": None if mail_id is None else str(mail_id)}).rowcount
 
 
 def nachziehen(grenze: int = GRENZE, stopp=None) -> dict:
@@ -116,5 +144,5 @@ def nachziehen(grenze: int = GRENZE, stopp=None) -> dict:
             fehler += 1
             LOG.warning("Unterhaltung nicht zugeordnet (%s)", type(e).__name__)
     with server.pool.connection() as conn, conn.transaction():
-        geerbt = conn.execute(_ERBE_SQL).rowcount
+        geerbt = erben(conn)
     return {"zugeordnet": zugeordnet, "geerbt": geerbt, "fehler": fehler}

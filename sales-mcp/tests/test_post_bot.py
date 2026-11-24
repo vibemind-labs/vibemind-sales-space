@@ -138,6 +138,8 @@ def test_bot_ausgabe_traegt_hinweis_und_dringlichkeit():
         "nicht_geprueft": "Noch nicht geprüft – nur Absender und Betreff.",
         "anweisung": ("Enthält eine Anweisung an eine KI – gesperrt, bis der "
                       "Besitzer sie freigibt. Nur Absender und Betreff."),
+        "gesendet": ("Vom Besitzer gesendete Mail – lässt sich nicht beantworten "
+                     "oder einstufen. Nur Absender und Betreff."),
     }
     lesbar = _mail(betreff="Lesbar", text="Volltext", dringlichkeit="heute")
     offen = _mail(betreff="Offen", text="Ungeprueft", geprueft=False)
