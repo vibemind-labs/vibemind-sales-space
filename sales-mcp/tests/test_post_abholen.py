@@ -73,35 +73,68 @@ def kein_modell(monkeypatch):
 # --- IMAP-Attrappe ---------------------------------------------------------
 
 class Attrappe:
-    def __init__(self, mails: dict, uidvalidity: int = 1):
+    def __init__(self, mails: dict, uidvalidity: int = 1, ordner: dict | None = None,
+                 sent: str | None = None, ordner_uidvalidity: dict | None = None,
+                 select_nein: set | None = None):
         self.mails = dict(mails)
         self.uidvalidity = uidvalidity
+        # Weitere Ordner (Name -> {uid: bytes}); `sent` traegt in LIST das Merkmal \Sent.
+        self.ordner = {"INBOX": self.mails, **{n: dict(m) for n, m in (ordner or {}).items()}}
+        self.sent = sent
+        self.ordner_uidvalidity = dict(ordner_uidvalidity or {})
+        self.select_nein = set(select_nein or ())
+        self.gewaehlt = "INBOX"
         self.selects = []
         self.geholt = []
         self.verboten = []
         self.ablehnen = set()      # UIDs, deren naechster Abruf mit NO endet
 
+    @staticmethod
+    def _name(mailbox) -> str:
+        return mailbox[1:-1] if mailbox[:1] == '"' and mailbox[-1:] == '"' else mailbox
+
     def select(self, mailbox="INBOX", readonly=False):
         if readonly is not True:
             pytest.fail("select ohne readonly=True - Stufe 1 darf nichts veraendern")
         self.selects.append((mailbox, readonly))
-        return "OK", [str(len(self.mails)).encode()]
+        name = self._name(mailbox)
+        if name in self.select_nein or name not in self.ordner:
+            return "NO", [b"Mailbox doesn't exist"]
+        self.gewaehlt = name
+        return "OK", [str(len(self.ordner[name])).encode()]
+
+    def list(self, *a):
+        zeilen = [b'(\\HasNoChildren) "/" "INBOX"']
+        for name in self.ordner:
+            if name != "INBOX":
+                merkmal = "\\Sent" if name == self.sent else "\\HasNoChildren"
+                zeilen.append(f'({merkmal}) "/" "{name}"'.encode())
+        return "OK", zeilen
+
+    def status(self, mailbox, names):
+        name = self._name(mailbox)
+        if name not in self.ordner:
+            return "NO", [b"no such mailbox"]
+        return "OK", [f'"{name}" (MESSAGES {len(self.ordner[name])})'.encode()]
 
     def response(self, code):
         if code == "UIDVALIDITY":
-            return code, [str(self.uidvalidity).encode()]
+            wert = self.ordner_uidvalidity.get(self.gewaehlt, self.uidvalidity
+                                               if self.gewaehlt == "INBOX" else 1)
+            return code, [str(wert).encode()]
         return code, [None]
 
     def uid(self, befehl, *args):
         befehl = befehl.lower()
+        mails = self.ordner[self.gewaehlt]
         if befehl == "search":
             m = re.fullmatch(r"UID (\d+):\*", args[-1])
             assert m, args
             start = int(m.group(1))
-            uids = sorted(u for u in self.mails if u >= start)
+            uids = sorted(u for u in mails if u >= start)
             # Echtes IMAP: "n:*" mit n > hoechster UID liefert die hoechste UID.
-            if not uids and self.mails:
-                uids = [max(self.mails)]
+            if not uids and mails:
+                uids = [max(mails)]
             return "OK", [" ".join(map(str, uids)).encode()]
         if befehl == "fetch":
             uid = int(args[0])
@@ -109,9 +142,9 @@ class Attrappe:
             if uid in self.ablehnen:
                 self.ablehnen.discard(uid)
                 return "NO", [b"Server busy"]
-            if self.mails.get(uid) is None:
+            if mails.get(uid) is None:
                 return "OK", [None]
-            return "OK", [(f"1 (UID {uid} RFC822 {{1}}".encode(), self.mails[uid]), b")"]
+            return "OK", [(f"1 (UID {uid} RFC822 {{1}}".encode(), mails[uid]), b")"]
         self._verboten(f"uid {befehl}")
 
     def _verboten(self, was):
@@ -310,6 +343,18 @@ def test_unlesbare_mails_werden_nie_zusammengelegt(monkeypatch):
     post_abholen.konto_abholen(_zeile("gmx-test"), Attrappe({1: _mail(), 2: _mail()},
                                                              uidvalidity=2))
     assert len(_mails()) == 4 and all(r["message_id_ersatz"] for r in _mails())
+
+
+def test_unlesbare_mail_bleibt_fuer_die_kopf_nachlese_offen(monkeypatch):
+    """Task-2-Review: kopf_nachgelesen ist nur true, wenn die Mail wirklich zerlegt wurde."""
+    _konto()
+    post_abholen.konto_abholen(_zeile("gmx-test"), Attrappe({1: _mail("<ok@x>")}))
+    monkeypatch.setattr(post_abholen, "_mail_zerlegen",
+                        lambda *a: (_ for _ in ()).throw(ValueError("kaputt")))
+    post_abholen.konto_abholen(_zeile("gmx-test"), Attrappe({1: _mail("<ok@x>"), 2: _mail()}))
+    rows = {r["imap_uid"]: r for r in _mails()}
+    assert rows[1]["kopf_nachgelesen"] is True
+    assert rows[2]["status"] == "fehler" and rows[2]["kopf_nachgelesen"] is False
 
 
 def test_kalenderteil_wird_beim_abholen_gespeichert():

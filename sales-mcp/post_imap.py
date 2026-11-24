@@ -365,6 +365,20 @@ def gesendet_ordner(kasten) -> str | None:
     return None
 
 
+def ordner_groesse(kasten, ordner: str) -> int | None:
+    """Zahl der Mails im Ordner per STATUS (MESSAGES) - nur lesend, ohne den Ordner zu
+    waehlen. None, wenn der Server den Wert nicht nennt oder den Befehl ablehnt."""
+    status, daten = kasten.status(postfach._imap_name(ordner), "(MESSAGES)")
+    if status != "OK":
+        return None
+    for teil in daten or ():
+        roh = teil.decode("utf-8", errors="replace") if isinstance(teil, bytes) else str(teil or "")
+        treffer = re.search(r"\bMESSAGES\s+(\d+)", roh)
+        if treffer:
+            return int(treffer.group(1))
+    return None
+
+
 def uidvalidity_lesen(kasten, ordner: str) -> int | None:
     """UIDVALIDITY des Ordners, nur lesend geoeffnet (None, wenn der Server keine nennt)."""
     lesend_waehlen(kasten, ordner)

@@ -55,6 +55,7 @@ import post_anweisung
 import post_einordnung
 import post_erledigt
 import post_herkunft
+import post_imap
 import post_konten
 import post_ordnen
 import post_struktur
@@ -89,6 +90,7 @@ GATEWAY_SERIE_MAX = 3
 _gateway_serie: set[str] = set()   # Mail-IDs der laufenden Serie; lebt im Prozess
 KOPF_MAX = 1000               # Absender/Empfaenger/Betreff: Fremddaten, gedeckelt
 REFERENZEN_MAX = 20           # References: nur die letzten Kennungen (naechste Vorfahren)
+GESENDET_STAPEL = 50          # gesendete Mails je Konto und Runde
 ANHANG_NAME_MAX = 200
 ANHAENGE_MAX = 50
 
@@ -276,32 +278,49 @@ def _uidvalidity(kasten) -> int | None:
         return None
 
 
-def _uidvalidity_pruefen(zeile: dict, aktuell: int | None) -> int:
-    """Liefert die `letzte_uid`, ab der zu holen ist (0 = von vorn)."""
+def _uidvalidity_pruefen(zeile: dict, aktuell: int | None, richtung: str = "eingang",
+                         neu_anfangen: bool = False) -> int:
+    """Liefert die `letzte_uid`, ab der zu holen ist (0 = von vorn).
+
+    `richtung` bestimmt, wessen Zeilen umnummeriert werden und wo der Stand liegt:
+    INBOX in post_konten, der Gesendet-Ordner in post_ordner_stand (dann tragen `zeile`
+    "ordner"). `neu_anfangen` = der Ordner heisst anders als beim letzten Lauf; das
+    gilt wie ein UIDVALIDITY-Wechsel."""
     letzte = int(zeile.get("letzte_uid") or 0)
     gespeichert = zeile.get("uidvalidity")
-    if aktuell is None or gespeichert == aktuell:
+    if not neu_anfangen and (aktuell is None or gespeichert == aktuell):
         return letzte
     with server.pool.connection() as conn, conn.transaction():
-        if gespeichert is not None:
+        if gespeichert is not None or neu_anfangen:
             LOG.info("Konto %s: UIDVALIDITY geaendert - hole neu", zeile["kennung"])
             # Alte UIDs gelten nicht mehr: unter alle vorhandenen Platzhalter
             # schieben (eindeutig, auch nach mehreren Wechseln), damit die neuen
-            # UIDs frei sind. Die Zeilen selbst bleiben (nie loeschen).
+            # UIDs frei sind. Die Zeilen selbst bleiben (nie loeschen). Nur die
+            # Zeilen dieser Richtung: (konto_id, richtung, imap_uid) ist der Unique.
             conn.execute(
                 "with basis as (select least(coalesce(min(imap_uid), 0), 0) as b "
-                "               from post_mails where konto_id = %s), "
+                "               from post_mails where konto_id = %s and richtung = %s), "
                 "alt as (select id, row_number() over (order by imap_uid) as n "
-                "        from post_mails where konto_id = %s and imap_uid > 0) "
+                "        from post_mails where konto_id = %s and richtung = %s "
+                "        and imap_uid > 0) "
                 "update post_mails p set imap_uid = basis.b - alt.n "
-                "from alt, basis where p.id = alt.id", (zeile["id"], zeile["id"]))
-        conn.execute(
-            "update post_konten set uidvalidity = %s, letzte_uid = null, "
-            "altbestand_fertig = false where id = %s", (aktuell, zeile["id"]))
+                "from alt, basis where p.id = alt.id",
+                (zeile["id"], richtung, zeile["id"], richtung))
+        if richtung == "gesendet":
+            conn.execute(
+                "insert into post_ordner_stand (konto_id, richtung, ordner, uidvalidity, "
+                "letzte_uid, altbestand_fertig) values (%s, 'gesendet', %s, %s, null, false) "
+                "on conflict (konto_id, richtung) do update set ordner = excluded.ordner, "
+                "uidvalidity = excluded.uidvalidity, letzte_uid = null, "
+                "altbestand_fertig = false", (zeile["id"], zeile["ordner"], aktuell))
+        else:
+            conn.execute(
+                "update post_konten set uidvalidity = %s, letzte_uid = null, "
+                "altbestand_fertig = false where id = %s", (aktuell, zeile["id"]))
     return 0
 
 
-def _ersatz_wiederfinden(conn, zeile: dict, mail: dict):
+def _ersatz_wiederfinden(conn, zeile: dict, mail: dict, richtung: str = "eingang"):
     """M3: eine Mail OHNE Message-ID nach einem UIDVALIDITY-Wechsel
     wiedererkennen. Der Platzhalter enthaelt die alte UID und taugt dafuer
     nicht; stattdessen gleiches Konto + Absender + Betreff + Datum unter den
@@ -311,58 +330,95 @@ def _ersatz_wiederfinden(conn, zeile: dict, mail: dict):
         return None
     return conn.execute(
         "select id, konto_id, imap_uid from post_mails where konto_id = %s "
-        "and message_id_ersatz and imap_uid < 0 "
+        "and richtung = %s and message_id_ersatz and imap_uid < 0 "
         "and von is not distinct from %s and betreff is not distinct from %s "
         "and datum is not distinct from %s order by imap_uid desc limit 1",
-        (zeile["id"], mail["von"], mail["betreff"], mail["datum"])).fetchone()
+        (zeile["id"], richtung, mail["von"], mail["betreff"], mail["datum"])).fetchone()
 
 
-def _speichern(zeile: dict, uid: int, mail: dict | None) -> bool:
+def _speichern(zeile: dict, uid: int, mail: dict | None, richtung: str = "eingang") -> bool:
     """Eine Mail und der neue Stand `letzte_uid` in EINER Transaktion: bricht
-    die Runde ab, ist weder eine Mail doppelt noch eine uebersprungen."""
+    die Runde ab, ist weder eine Mail doppelt noch eine uebersprungen.
+
+    `gesendet`: Status `gesendet`, ohne Fach und Einordnung, nie vom Modell gesehen.
+    Dublettensuche, Wiederfinden und Umnummerieren gelten nur innerhalb der Richtung.
+    Der Stand geht in post_konten (eingang) bzw. post_ordner_stand (gesendet; dafuer
+    traegt `zeile` den Ordnernamen unter "ordner")."""
+    gesendet = richtung == "gesendet"
     neu = False
     with server.pool.connection() as conn, conn.transaction():
         if mail is not None:
             ersatz = bool(mail.get("message_id_ersatz"))
             if ersatz:
-                vorhanden = _ersatz_wiederfinden(conn, zeile, mail)
+                vorhanden = _ersatz_wiederfinden(conn, zeile, mail, richtung)
             else:
                 vorhanden = conn.execute(
                     "select id, konto_id, imap_uid from post_mails where besitzer = %s "
+                    "and richtung = %s "
                     "and message_id = %s and not message_id_ersatz "
                     "and von is not distinct from %s "
                     "and betreff is not distinct from %s "
                     "order by (konto_id = %s and imap_uid < 0) desc limit 1",
-                    (zeile["besitzer"], mail["message_id"], mail["von"], mail["betreff"],
-                     zeile["id"])).fetchone()
+                    (zeile["besitzer"], richtung, mail["message_id"], mail["von"],
+                     mail["betreff"], zeile["id"])).fetchone()
             if vorhanden is None:
+                fehler = mail.get("fehler")
+                an, text, auszug = mail["an"], mail["text"], mail["auszug"]
+                anhaenge = mail["anhaenge"]
+                herkunft = mail.get("urspruengliche_adresse")
+                sensibel = False
+                if gesendet:
+                    # Ruling S3: der Absender ist Felix - die festen Muster gelten fuer
+                    # Empfaenger und Betreff (der Treffer ueber `von` bleibt mit drin,
+                    # damit nichts weniger gilt als beim Zerlegen).
+                    sensibel = (_sensibel_nach_muster(an or "", mail["betreff"] or "")
+                                or _sensibel_nach_muster(mail["von"] or "", mail["betreff"] or ""))
+                    if sensibel:
+                        an = text = auszug = herkunft = None
+                        anhaenge = []
+                    status, bereich, fach = ("gesendet", zeile.get("standard_bereich") or "privat",
+                                             None)
+                else:
+                    status = "fehler" if fehler else "neu"
+                    bereich = "privat" if fehler else None
+                    fach = post_struktur.UNKLAR if fehler else None
                 neu = conn.execute(
                     "insert into post_mails (konto_id, imap_uid, message_id, besitzer, "
                     "von, an, betreff, datum, text, auszug, anhaenge, status, fehler, "
                     "bereich, fach, message_id_ersatz, kalenderteil, urspruengliche_adresse, "
-                    "in_reply_to, referenzen, kopf_nachgelesen) values "
+                    "in_reply_to, referenzen, kopf_nachgelesen, richtung, ordner, sensibel) values "
                     "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
-                    "%s, %s, true) "
+                    "%s, %s, %s, %s, %s, %s) "
                     "on conflict (konto_id, richtung, imap_uid) do nothing returning id",
                     (zeile["id"], uid, mail["message_id"], zeile["besitzer"], mail["von"],
-                     mail["an"], mail["betreff"], mail["datum"], mail["text"],
-                     mail["auszug"], mail["anhaenge"],
-                     "fehler" if mail.get("fehler") else "neu", mail.get("fehler"),
-                     "privat" if mail.get("fehler") else None,
-                     post_struktur.UNKLAR if mail.get("fehler") else None,
-                     ersatz, bool(mail.get("kalenderteil")), mail.get("urspruengliche_adresse"),
-                     mail.get("in_reply_to"), mail.get("referenzen") or [])
+                     an, mail["betreff"], mail["datum"], text, auszug, anhaenge,
+                     status, fehler, bereich, fach,
+                     ersatz, bool(mail.get("kalenderteil")), herkunft,
+                     mail.get("in_reply_to"), mail.get("referenzen") or [],
+                     # Nur eine wirklich zerlegte Mail: unlesbare bleiben fuer die Nachlese offen.
+                     not fehler, richtung, zeile["ordner"] if gesendet else "INBOX", sensibel)
                 ).fetchone() is not None
             elif str(vorhanden["konto_id"]) == str(zeile["id"]) and vorhanden["imap_uid"] < 0:
                 # Nach UIDVALIDITY-Wechsel wiedergefunden: neuer Fundort, keine
                 # Dublette. Ein Platzhalter traegt die UID im Namen - er zieht mit.
+                # Gesendete Zeilen ziehen auch mit dem Ordnernamen um.
                 conn.execute(
                     "update post_mails set imap_uid = %s, message_id = case when "
-                    "message_id_ersatz then %s else message_id end where id = %s",
-                    (uid, mail["message_id"], vorhanden["id"]))
-        conn.execute(
-            "update post_konten set letzte_uid = greatest(coalesce(letzte_uid, 0), %s) "
-            "where id = %s", (uid, zeile["id"]))
+                    "message_id_ersatz then %s else message_id end, "
+                    "ordner = case when richtung = 'gesendet' then %s else ordner end "
+                    "where id = %s",
+                    (uid, mail["message_id"], zeile.get("ordner"), vorhanden["id"]))
+        if gesendet:
+            conn.execute(
+                "insert into post_ordner_stand (konto_id, richtung, ordner, letzte_uid) "
+                "values (%s, 'gesendet', %s, %s) on conflict (konto_id, richtung) do update "
+                "set ordner = excluded.ordner, letzte_uid = greatest("
+                "coalesce(post_ordner_stand.letzte_uid, 0), excluded.letzte_uid)",
+                (zeile["id"], zeile["ordner"], uid))
+        else:
+            conn.execute(
+                "update post_konten set letzte_uid = greatest(coalesce(letzte_uid, 0), %s) "
+                "where id = %s", (uid, zeile["id"]))
     return neu
 
 
@@ -410,6 +466,85 @@ def konto_abholen(zeile: dict, kasten=None, stapel: int = 50) -> int:
                 kasten.logout()
             except Exception:  # noqa: BLE001 - Abmelden ist Hoeflichkeit
                 pass
+
+
+def _gesendet_stand(konto_id) -> dict | None:
+    with server.pool.connection() as conn:
+        return conn.execute(
+            "select ordner, uidvalidity, letzte_uid, altbestand_fertig from post_ordner_stand "
+            "where konto_id = %s and richtung = 'gesendet'", (konto_id,)).fetchone()
+
+
+def gesendet_abholen(zeile: dict, kasten, stapel: int = GESENDET_STAPEL) -> int:
+    """Holt hoechstens `stapel` neue Mails aus dem Gesendet-Ordner (Merkmal \\Sent) des
+    Kontos, nur lesend (EXAMINE, UID SEARCH, UID FETCH). Rueckgabe = neu gespeichert.
+    Ohne Gesendet-Ordner: 0, nichts wird geschrieben. Heisst der Ordner anders als beim
+    letzten Lauf, gilt das wie ein UIDVALIDITY-Wechsel: von vorn, ohne Dubletten."""
+    ordner = post_imap.gesendet_ordner(kasten)
+    if ordner is None:
+        return 0
+    post_imap.lesend_waehlen(kasten, ordner)
+    stand = _gesendet_stand(zeile["id"])
+    umbenannt = stand is not None and stand["ordner"] != ordner
+    arbeit = dict(zeile)
+    arbeit.update({"ordner": ordner,
+                   "uidvalidity": stand["uidvalidity"] if stand else None,
+                   "letzte_uid": stand["letzte_uid"] if stand else None})
+    letzte = _uidvalidity_pruefen(arbeit, _uidvalidity(kasten), "gesendet", umbenannt)
+    status, daten = kasten.uid("search", None, f"UID {letzte + 1}:*")
+    if status != "OK":
+        raise RuntimeError("IMAP-Suche abgelehnt")
+    # "n:*" liefert auf echtem IMAP immer mindestens die hoechste UID - nachfiltern.
+    offen = sorted(u for u in (int(x) for x in (daten[0] or b"").split()) if u > letzte)
+    dieser_stapel = offen[:max(1, int(stapel))]
+    neu = 0
+    for uid in dieser_stapel:
+        if _STOPP.is_set():
+            return neu
+        nachricht = _holen(kasten, uid)
+        mail = None
+        if nachricht is None:
+            LOG.info("Konto %s: gesendet UID %s ohne Inhalt (entfernt) - uebersprungen",
+                     zeile["kennung"], uid)
+        else:
+            try:
+                mail = _mail_zerlegen(nachricht, zeile["kennung"], uid,
+                                      zeile.get("adresse") or "")
+            except Exception as e:  # noqa: BLE001 - sonst haengt das Konto ewig an dieser UID
+                LOG.warning("Konto %s: gesendete Mail %s nicht lesbar (%s)", zeile["kennung"],
+                            uid, type(e).__name__)
+                mail = _unlesbar(zeile["kennung"], uid, type(e).__name__)
+        neu += 1 if _speichern(arbeit, uid, mail, "gesendet") else 0
+    if len(dieser_stapel) == len(offen):
+        with server.pool.connection() as conn:
+            conn.execute(
+                "insert into post_ordner_stand (konto_id, richtung, ordner, altbestand_fertig) "
+                "values (%s, 'gesendet', %s, true) on conflict (konto_id, richtung) "
+                "do update set altbestand_fertig = true", (zeile["id"], ordner))
+    return neu
+
+
+def gesendet_groessen() -> list[str]:
+    """Je aktivem Konto eine Zeile `<kennung> <anzahl|unbekannt>`. Nur STATUS, nichts
+    wird gespeichert, kein Ordnername in der Ausgabe."""
+    zeilen = []
+    for zeile in post_konten.aktive_konten():
+        anzahl = None
+        try:
+            kasten = post_konten.verbinden(zeile)
+            try:
+                ordner = post_imap.gesendet_ordner(kasten)
+                anzahl = post_imap.ordner_groesse(kasten, ordner) if ordner else None
+            finally:
+                try:
+                    kasten.logout()
+                except Exception:  # noqa: BLE001 - Abmelden ist Hoeflichkeit
+                    pass
+        except Exception as e:  # noqa: BLE001 - nur der Typ
+            LOG.warning("Konto %s: Gesendet-Groesse nicht ermittelt (%s)", zeile["kennung"],
+                        type(e).__name__)
+        zeilen.append(f"{zeile['kennung']} {'unbekannt' if anzahl is None else anzahl}")
+    return zeilen
 
 
 # ---------------------------------------------------------------------------
@@ -730,12 +865,28 @@ def modellaufrufe_heute() -> int:
 
 
 def eine_runde() -> dict:
-    bilanz = {"abgeholt": 0, "konten_fehler": 0, "eingeordnet": 0}
+    bilanz = {"abgeholt": 0, "konten_fehler": 0, "eingeordnet": 0,
+              "gesendet": 0, "gesendet_fehler": 0}
     for zeile in post_konten.aktive_konten():
         if _STOPP.is_set():
             return bilanz
         try:
-            bilanz["abgeholt"] += konto_abholen(zeile)
+            # Eine Verbindung je Konto: erst INBOX, dann der Gesendet-Ordner.
+            kasten = post_konten.verbinden(zeile)
+            try:
+                bilanz["abgeholt"] += konto_abholen(zeile, kasten)
+                if not _STOPP.is_set():
+                    try:
+                        bilanz["gesendet"] += gesendet_abholen(zeile, kasten)
+                    except Exception as e:  # noqa: BLE001 - kostet nicht das INBOX-Abholen
+                        bilanz["gesendet_fehler"] += 1
+                        LOG.warning("Konto %s: Gesendet abholen fehlgeschlagen (%s)",
+                                    zeile["kennung"], type(e).__name__)
+            finally:
+                try:
+                    kasten.logout()
+                except Exception:  # noqa: BLE001 - Abmelden ist Hoeflichkeit
+                    pass
         except Exception as e:  # noqa: BLE001 - ein Konto haelt die anderen nicht auf
             bilanz["konten_fehler"] += 1
             LOG.warning("Konto %s: Abholen fehlgeschlagen (%s)", zeile["kennung"],
@@ -817,8 +968,15 @@ def _logging_einrichten() -> None:
     LOG.propagate = False
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     _logging_einrichten()
+    argv = sys.argv[1:] if argv is None else argv
+    if "--gesendet-groessen" in argv:
+        # Nur zum Nachsehen, wie gross die Gesendet-Ordner sind (STATUS, lesend).
+        socket.setdefaulttimeout(IMAP_TIMEOUT_S)
+        for ausgabe in gesendet_groessen():
+            print(ausgabe)
+        return 0
     # imaplib.IMAP4_SSL (postfach._imap_oeffnen) verbindet und meldet sich ohne
     # Zeitgrenze an: ein haengender Anbieter hielte den Dienst fuer immer fest.
     # Die Vorgabe gilt fuer jeden danach geoeffneten Python-Socket; psycopg
@@ -846,7 +1004,8 @@ def main() -> int:
         try:
             bilanz = eine_runde()
             if (bilanz.get("abgeholt") or bilanz.get("eingeordnet") or bilanz.get("konten_fehler")
-                    or bilanz.get("ziele")):
+                    or bilanz.get("ziele") or bilanz.get("gesendet")
+                    or bilanz.get("gesendet_fehler")):
                 LOG.info("Runde: %s", bilanz)
         except Exception as e:  # noqa: BLE001 - Meldung koennte Mailinhalt zitieren
             LOG.error("Runde uebersprungen (%s)", type(e).__name__)
